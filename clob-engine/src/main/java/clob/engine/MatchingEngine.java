@@ -258,6 +258,33 @@ public final class MatchingEngine {
         checkAllMid(time);
     }
 
+    // ------------------------------------------------------------------ session (sequenced)
+
+    /**
+     * Changes the trading state of one instrument, or of all with {@code instrumentId} -1. On reopening,
+     * races that expired meanwhile resolve and resting mid orders are re-checked.
+     */
+    public void onSessionState(int instrumentId, SessionState state, long time) {
+        advanceTo(time);
+        for (OrderBook book : books) {
+            if (book == null || instrumentId != -1 && book.instrument.id() != instrumentId || book.session == state) {
+                continue;
+            }
+            book.session = state;
+            listener.onSessionState(time, book.instrument.id(), state);
+            if (state == SessionState.OPEN) {
+                races.resolveDeferred(book, time);
+                book.lastMidBid = Long.MIN_VALUE; // force a mid re-check
+                mid.check(book, time);
+            }
+        }
+    }
+
+    /** Deadline of the next internal timer, or {@code Long.MAX_VALUE}. The sequencer injects a time input then. */
+    public long nextTimerDeadline() {
+        return timers.isEmpty() ? Long.MAX_VALUE : timers.peekTime();
+    }
+
     // ------------------------------------------------------------------ fixing inputs (sequenced)
 
     /**
@@ -306,6 +333,10 @@ public final class MatchingEngine {
         }
         if (c.side == null || c.type == null || c.tif == null) {
             return RejectReason.MISSING_FIELD;
+        }
+        SessionState session = books[c.instrumentId].session;
+        if (session != SessionState.OPEN) {
+            return session == SessionState.HALTED ? RejectReason.MARKET_HALTED : RejectReason.MARKET_NOT_OPEN;
         }
         if (!refData.isEntitled(c.userId, c.accountId)) {
             return RejectReason.NOT_ENTITLED;
@@ -359,6 +390,9 @@ public final class MatchingEngine {
         Instrument instrument = books[o.instrumentId].instrument;
         if (o.type == OrderType.FIXING || o.type == OrderType.MARKET) {
             return RequestRejectReason.NOT_REPLACEABLE;
+        }
+        if (!books[o.instrumentId].isOpen()) {
+            return RequestRejectReason.MARKET_NOT_OPEN;
         }
         if (o.queue != null && o.type != OrderType.MID) {
             return RequestRejectReason.PENDING_IN_RACE; // waiting in a race ticket (PLAN Q37 default)

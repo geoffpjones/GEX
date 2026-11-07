@@ -43,6 +43,8 @@ final class RaceManager {
         long price;
         long expiry;
         long seed;
+        /** Expired while the instrument was not open; resolves when it reopens. */
+        boolean deferred;
         final ArrayList<Ticket> tickets = new ArrayList<>();
     }
 
@@ -116,6 +118,7 @@ final class RaceManager {
         r.price = price;
         r.expiry = expiry;
         r.seed = SplitMix64.mix(baseSeed ^ SplitMix64.mix(r.id));
+        r.deferred = false;
         active.put(r.id, r);
         activeList.add(r);
         engine.schedule(expiry, MatchingEngine.TIMER_RACE, r.id);
@@ -145,6 +148,27 @@ final class RaceManager {
         if (r == null || r.expiry != deadline) {
             return;
         }
+        if (!engine.book(r.instrumentId).isOpen()) {
+            r.deferred = true;
+            return;
+        }
+        resolve(r, deadline);
+    }
+
+    /** Resolves, in start order, the book's races that expired while it was not open. */
+    void resolveDeferred(OrderBook book, long time) {
+        for (int k = 0; k < activeList.size(); ) {
+            Race r = activeList.get(k);
+            if (r.deferred && r.instrumentId == book.instrument.id()) {
+                resolve(r, time); // removes r from activeList
+            } else {
+                k++;
+            }
+        }
+    }
+
+    private void resolve(Race r, long deadline) {
+        long raceId = r.id;
         active.remove(raceId);
         activeList.remove(r);
         OrderBook book = engine.book(r.instrumentId);

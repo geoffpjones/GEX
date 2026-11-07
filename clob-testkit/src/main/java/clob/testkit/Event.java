@@ -28,6 +28,8 @@ public sealed interface Event {
 
     record Repriced(long time, long orderId, long price) implements Event {}
 
+    record Session(long time, int instrumentId, clob.engine.SessionState state) implements Event {}
+
     record RaceStarted(long time, long raceId, int instrumentId, boolean taker, Side side, long price, long expiry,
             long seed) implements Event {}
 

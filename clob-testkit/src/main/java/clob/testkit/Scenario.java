@@ -173,6 +173,11 @@ public final class Scenario {
         return this;
     }
 
+    public Scenario session(clob.engine.SessionState state) {
+        engine.onSessionState(instrument.id(), state, now);
+        return this;
+    }
+
     public Scenario endOfDay() {
         engine.onEndOfDay(now);
         return this;

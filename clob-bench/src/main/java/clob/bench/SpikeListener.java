@@ -123,6 +123,14 @@ final class SpikeListener implements EngineListener {
     }
 
     @Override
+    public void onSessionState(long time, int instrumentId, clob.engine.SessionState state) {
+        int p = claim();
+        out.putByte(p, (byte) 13);
+        out.putLong(p + 8, time);
+        out.putInt(p + 16, instrumentId);
+    }
+
+    @Override
     public void onOrderRepriced(long time, long orderId, long price) {
         int p = claim();
         out.putByte(p, (byte) 8);

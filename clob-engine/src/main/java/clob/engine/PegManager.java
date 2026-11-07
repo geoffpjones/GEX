@@ -99,6 +99,10 @@ final class PegManager {
 
     void onTick(OrderBook book, long time) {
         book.pegTickScheduled = false;
+        if (!book.isOpen()) {
+            ensureTick(book, time); // no reprices while not open; keep the grid going
+            return;
+        }
         // Snapshot ids: processing one peg can fill and remove others.
         int n = 0;
         for (Order o = book.pegHead; o != null; o = o.pegNext) {

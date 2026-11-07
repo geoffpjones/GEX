@@ -39,6 +39,9 @@ public interface EngineListener {
     /** An order joined a race instead of matching or resting; it is applied when the race resolves. */
     void onOrderJoinedRace(long time, long orderId, long raceId);
 
+    /** An instrument changed trading state. */
+    void onSessionState(long time, int instrumentId, SessionState state);
+
     /** A peg order moved to a new price, or resumed after suspension. It has new time priority. */
     void onOrderRepriced(long time, long orderId, long price);
 

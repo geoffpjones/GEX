@@ -72,7 +72,7 @@ final class MidMatcher {
 
     /** Re-checks resting mid orders after the reference may have moved. */
     void check(OrderBook book, long time) {
-        if (book.midBuys.isEmpty() || book.midSells.isEmpty()) {
+        if (!book.isOpen() || book.midBuys.isEmpty() || book.midSells.isEmpty()) {
             return;
         }
         long bid = book.referenceBid();

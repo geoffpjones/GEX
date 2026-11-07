@@ -18,5 +18,8 @@ public enum RejectReason {
     /** FIXING: the event has no open occurrence (not scheduled, or past its cut-off). */
     FIXING_NOT_OPEN,
     /** The TIF is supported by the instrument but not for this order type. */
-    INVALID_TIF_FOR_TYPE
+    INVALID_TIF_FOR_TYPE,
+    /** The instrument is pre-open or closed. */
+    MARKET_NOT_OPEN,
+    MARKET_HALTED
 }

@@ -70,6 +70,11 @@ public final class RecordingListener implements EngineListener {
     }
 
     @Override
+    public void onSessionState(long time, int instrumentId, clob.engine.SessionState state) {
+        events.add(new Event.Session(time, instrumentId, state));
+    }
+
+    @Override
     public void onOrderRepriced(long time, long orderId, long price) {
         events.add(new Event.Repriced(time, orderId, price));
     }

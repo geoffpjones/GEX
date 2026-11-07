@@ -16,5 +16,7 @@ public enum RequestRejectReason {
     LEAVES_BELOW_MIN_QTY,
     NOT_REPLACEABLE,
     /** The order is waiting in a race lottery; it can be amended once the race resolves. */
-    PENDING_IN_RACE
+    PENDING_IN_RACE,
+    /** Amends are only accepted while the instrument is open (cancels always are). */
+    MARKET_NOT_OPEN
 }

@@ -22,6 +22,8 @@ subprojects {
 
     tasks.withType<Test>().configureEach {
         useJUnitPlatform()
+        // Agrona 2.x buffers and ring buffers use jdk.internal.misc.Unsafe.
+        jvmArgs("--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED")
         testLogging { events("failed"); exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL }
     }
 }

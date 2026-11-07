@@ -13,7 +13,7 @@ Source: `requirements.md`. This plan covers the architecture, the build phases, 
 
 ## Implementation status (2026-11-07)
 
-**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit), Phase 4 core (pegged, mid and fixing orders), Phase 5 core (fairness races).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 179 tests, all green.
+**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit), Phase 4 core (pegged, mid and fixing orders), Phase 5 core (fairness races), Phase 6 core (sequencing, journal, replay, session lifecycle).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 202 tests, all green.
 
 | Module | Contents |
 |---|---|
@@ -21,6 +21,7 @@ Source: `requirements.md`. This plan covers the architecture, the build phases, 
 | `clob-refdata` | `Instrument` (all spec parameters plus base/term currency, validated), `RefData` (instruments, user↔account entitlements) |
 | `clob-credit` | `CreditEngine`: lines (pools) with a giver, type and USD limit; relationships (default plus per-instrument overrides); DSL per value date, NOP net; exact USD×10⁸ arithmetic; dry-run overlay for FOK |
 | `clob-engine` | `MatchingEngine` (pure, single-threaded, no clock), array-based `BookSide`, intrusive `PriceLevel` FIFOs (displayed and hidden queues), pooled orders and levels, timer heap, `FillSimulator` for FOK |
+| `clob-sequencer` | `InputCodec` (all 14 input types), `EngineDispatcher`, `OutputEncoder`, `Journal` (mmap segments, CRC32C, torn-tail recovery), `Sequencer` (stamp, journal, timer injection), `Pipeline` (gateway → sequencer → engine threads over Agrona rings) |
 | `clob-testkit` | `Scenario` DSL (reads the requirements' `id\|side\|show\|price\|qty` tables), credit setup helpers, recorded events |
 | `clob-bench` | Throughput/latency harness (`SPIKE-RESULTS.md`) |
 
@@ -88,6 +89,23 @@ Phase 5, as built (`RaceManager`, `SplitMix64` in `clob-engine`):
 
   Options for Phase 9: run race expiries as their own sequenced inputs; pre-size race, ticket and held-order pools.
 
+Phase 6, as built (`clob-sequencer`, plus session state in the engine):
+- **Input codec.** A fixed-layout little-endian binary codec for every engine input (SBE-style, so generated SBE can replace it). Header: length, type, sequence, time.
+- **Sequencer.** Stamps each input with a sequence number and a monotonic epoch-nanos time, appends it to the journal, then forwards it. It injects a time input whenever the clock passes the engine's next timer deadline, so expiries, TTL releases, peg ticks, races and fixing cut-offs happen with no order flow. Those inputs are journalled too.
+- **Journal.** Memory-mapped, pre-touched segment files, with a CRC32C per record and the length written last. On open, a torn tail in the last segment is truncated and appending resumes; corruption in an earlier segment fails the open. Durability is page cache plus an explicit `flush()`. This stands in for Aeron Archive.
+- **Pipeline.** Gateway threads feed a many-to-one ring into the sequencer thread (stamp, journal), which feeds a one-to-one ring into the engine thread (decode, match, emit encoded output). The journal stays off the engine thread.
+- **Replay and recovery.** Replaying the journal into a fresh engine reproduces the output byte for byte, including with three concurrent gateway threads. Recovering after a crash (replay, then continue) is byte-identical to an uninterrupted run. Mutation-checked: journalling before stamping makes these tests fail.
+- **Session lifecycle.** Each instrument is PRE_OPEN, OPEN, HALTED or CLOSED, reported as `onSessionState`.
+  - Outside OPEN, new orders and amends are rejected (`MARKET_NOT_OPEN` / `MARKET_HALTED`); cancels always work.
+  - Peg reprices, mid matching and race lotteries wait. A race that expires during a halt resolves at reopen.
+  - GTT expiry and min-TTL releases continue.
+- **Admin inputs** the engine refuses (invalid credit configuration, an inapplicable fixing schedule or rate) are reported to an `ErrorListener`. They leave state unchanged, identically in live running and replay.
+- **Not built yet:**
+  - state snapshots, so recovery currently replays the whole journal (Q39);
+  - Aeron Archive and Aeron Cluster (Phase 10 HA);
+  - a flush policy (Q40);
+  - an end-to-end pipeline benchmark (Phase 9).
+
 Defaults chosen for open questions (each is easy to change):
 - Q6i: `minQty` must be a multiple of `qtyIncrement`.
 - Q7c: market orders never rest, whatever their TIF.
@@ -126,7 +144,7 @@ Defaults chosen for open questions (each is easy to change):
 
 **Decision:** stay on one shard for Phase 3, keep the engine shard-ready, and re-run the spike on production-class hardware before Phase 3 finishes. Sharding is triggered if load exceeds 50%, or p99 exceeds the latency target, at the agreed aggregate peak (Q11).
 
-Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: JMH benchmarks, Phase 6 onwards, and book-delta output for market data.
+Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: JMH benchmarks, Phase 7 onwards, and book-delta output for market data.
 
 ---
 
@@ -494,3 +512,6 @@ Status key: ✅ answered · 🟡 partly answered, follow-ups listed · ❓ open.
 35. ❓ **When pegs suspend.** Pegs are checked only on peg ticks. So if one side of the book empties between ticks, resting pegs keep their last price for up to one throttle interval (20ms) before suspending. Is that acceptable, or must they suspend immediately?
 36. ❓ **Mid priority.** Among mid orders that cross, priority is pure time. Should a more aggressive discretion win over an older but less aggressive order?
 37. ❓ **Maker races and amends.** Only newly submitted orders start or join a maker race. Should an amend, or a peg reprice, that creates a new price level start one too? And can orders waiting in a race be amended (today they can only be cancelled)?
+38. ❓ **Halt and pre-open behaviour.** Orders are rejected outside OPEN, not queued for the open. Races that expire during a halt resolve at reopen, and resting orders stay on the book. Should halts instead cancel pending race orders? Is a pre-open order-entry phase (accept orders, no matching) needed?
+39. ❓ **Snapshots.** Recovery replays the whole journal. Since GTC orders live across sessions, should we snapshot engine state (for example, at each end of day) and start new journals from it? Is a recovery-time target set?
+40. ❓ **Journal durability.** Appends are durable against a process crash but not a power loss until flushed. Options: flush every N ms (latency cost), or rely on replication (Aeron Cluster, Phase 10). Which?

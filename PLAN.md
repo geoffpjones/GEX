@@ -13,7 +13,7 @@ Source: `requirements.md`. This plan covers the architecture, the build phases, 
 
 ## Implementation status (2026-11-07)
 
-**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit), Phase 4 core (pegged, mid and fixing orders), Phase 5 core (fairness races), Phase 6 core (sequencing, journal, replay, session lifecycle).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 202 tests, all green.
+**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit), Phase 4 core (pegged, mid and fixing orders), Phase 5 core (fairness races), Phase 6 core (sequencing, journal, replay, session lifecycle), Phase 7 core (FIX order entry).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 215 tests, all green.
 
 | Module | Contents |
 |---|---|
@@ -22,6 +22,7 @@ Source: `requirements.md`. This plan covers the architecture, the build phases, 
 | `clob-credit` | `CreditEngine`: lines (pools) with a giver, type and USD limit; relationships (default plus per-instrument overrides); DSL per value date, NOP net; exact USD×10⁸ arithmetic; dry-run overlay for FOK |
 | `clob-engine` | `MatchingEngine` (pure, single-threaded, no clock), array-based `BookSide`, intrusive `PriceLevel` FIFOs (displayed and hidden queues), pooled orders and levels, timer heap, `FillSimulator` for FOK |
 | `clob-sequencer` | `InputCodec` (all 14 input types), `EngineDispatcher`, `OutputEncoder`, `Journal` (mmap segments, CRC32C, torn-tail recovery), `Sequencer` (stamp, journal, timer injection), `Pipeline` (gateway → sequencer → engine threads over Agrona rings) |
+| `clob-fix` | FIX 4.4 acceptor: zero-copy tag=value codec, session layer, order translation, execution reports (`docs/FIX-RoE.md`) |
 | `clob-testkit` | `Scenario` DSL (reads the requirements' `id\|side\|show\|price\|qty` tables), credit setup helpers, recorded events |
 | `clob-bench` | Throughput/latency harness (`SPIKE-RESULTS.md`) |
 
@@ -106,6 +107,22 @@ Phase 6, as built (`clob-sequencer`, plus session state in the engine):
   - a flush policy (Q40);
   - an end-to-end pipeline benchmark (Phase 9).
 
+Phase 7, as built (`clob-fix`):
+- **FIX engine.** A compact FIX 4.4 acceptor instead of Artio. Artio needs its own Aeron media driver and archive, which is heavy for this environment. Artio stays a drop-in replacement behind the same gateway role.
+- **Gateway thread** (an Agrona agent, NIO, non-blocking):
+  - Logon with Username/Password; heartbeats and TestRequest timeouts; ResendRequest (application messages resent with PossDupFlag, admin messages gap-filled); SequenceReset; inbound gap detection; Logout.
+  - Per-session token-bucket throttling; cancel-on-disconnect, which also fires on a clean logout.
+- **Order entry:** D, F, G and q translate into engine inputs through the pipeline. Engine output reaches the gateway via an `OutputRing` and becomes execution reports, OrderCancelRejects, mass-cancel reports and TradingSessionStatus.
+- **Rules of engagement:** `docs/FIX-RoE.md`, including the custom tags (tenor, CLOB order type, discretion, fixing event, race id, trade id) and the mapping from engine events to ExecType and OrdStatus.
+- **Tests.** 7 QuickFIX/J conformance tests (full FIX 4.4 dictionary validation of everything we send) and 6 raw-socket session-layer tests. The disconnect test found a real bug: a clean logout skipped cancel-on-disconnect. Fixed.
+- **Not built yet:**
+  - persistent FIX sequence numbers and resend store (Q41);
+  - market data over FIX (Phase 8);
+  - drop copy (Phase 10);
+  - TLS;
+  - hashed passwords;
+  - multi-gateway output fan-out.
+
 Defaults chosen for open questions (each is easy to change):
 - Q6i: `minQty` must be a multiple of `qtyIncrement`.
 - Q7c: market orders never rest, whatever their TIF.
@@ -144,7 +161,7 @@ Defaults chosen for open questions (each is easy to change):
 
 **Decision:** stay on one shard for Phase 3, keep the engine shard-ready, and re-run the spike on production-class hardware before Phase 3 finishes. Sharding is triggered if load exceeds 50%, or p99 exceeds the latency target, at the agreed aggregate peak (Q11).
 
-Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: JMH benchmarks, Phase 7 onwards, and book-delta output for market data.
+Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: JMH benchmarks, Phase 8 onwards, and book-delta output for market data.
 
 ---
 
@@ -515,3 +532,4 @@ Status key: ✅ answered · 🟡 partly answered, follow-ups listed · ❓ open.
 38. ❓ **Halt and pre-open behaviour.** Orders are rejected outside OPEN, not queued for the open. Races that expire during a halt resolve at reopen, and resting orders stay on the book. Should halts instead cancel pending race orders? Is a pre-open order-entry phase (accept orders, no matching) needed?
 39. ❓ **Snapshots.** Recovery replays the whole journal. Since GTC orders live across sessions, should we snapshot engine state (for example, at each end of day) and start new journals from it? Is a recovery-time target set?
 40. ❓ **Journal durability.** Appends are durable against a process crash but not a power loss until flushed. Options: flush every N ms (latency cost), or rely on replication (Aeron Cluster, Phase 10). Which?
+41. ❓ **FIX session persistence.** Sequence numbers and the resend store are held in memory, so clients must reset sequences after a gateway restart. Should they persist (for example, rebuilt from the journal and engine output) so sessions survive a restart without a reset? Do we need TLS and hashed credentials for v1?

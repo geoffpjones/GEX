@@ -13,7 +13,7 @@ Source: `requirements.md`. This plan covers the architecture, the build phases, 
 
 ## Implementation status (2026-11-07)
 
-**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 113 tests, all green.
+**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit), Phase 4 core (pegged, mid and fixing orders).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 153 tests, all green.
 
 | Module | Contents |
 |---|---|
@@ -50,6 +50,26 @@ Phase 3 credit, as built:
   - aggressive IOCs are about 300 ns slower;
   - allocation is still zero.
 
+Phase 4, as built (`PegManager`, `MidMatcher`, `FixingDesk` in `clob-engine`):
+- **Pegged.**
+  - Pegs to MID or NEAR-TOUCH of the visible top of book, unscreened and excluding pegs, ± discretion (+ = more aggressive).
+  - Priced on entry, then repriced only on the instrument's peg-throttle grid (20ms), from a reference frozen at each tick, in arrival order.
+  - Rejected at entry, and suspended at a tick, when either visible side is missing; resumes at the first tick both are back.
+  - A reprice or resumption loses priority. A crossing peg trades.
+  - A discretion amend takes effect at the next tick, so it can't be used to beat the throttle.
+- **Mid.**
+  - Separate mid book per instrument, matching only mid orders.
+  - Limits are mid ± discretion, rounded defensively. Price is `clamp(mid, sellLimit, buyLimit)`, or the nearest valid price when the mid is between ticks.
+  - All four requirements examples pass.
+  - Resting mid orders are re-checked whenever the reference moves.
+  - Mid TTL replaces min TTL. Credit and min-qty rules apply. FOK has its own dry run.
+- **Fixing.**
+  - `FixingEvent` (name, time, zone, cut-off) in refdata, with DST-aware occurrence instants. Each occurrence is opened by a sequenced `onFixingSchedule` input.
+  - Fixing orders match only each other, continuously in time priority, with credit reserved at match time.
+  - Unmatched quantity is cancelled at cut-off. `onFixingRate` prices every pending match as a trade.
+- **Engine output:** new `onOrderRepriced`, `onOrderSuspended` and `onFixingMatched` events.
+- **Performance:** with no peg, mid or fixing orders in the flow, the engine is about 2–10% slower than at Phase 3 (back-to-back runs: about 2.3–2.4M vs 2.4–2.6M events/s). The likely cause is the larger `Order` object. To recover in Phase 9 by moving rarely used fields out of `Order`.
+
 Defaults chosen for open questions (each is easy to change):
 - Q6i: `minQty` must be a multiple of `qtyIncrement`.
 - Q7c: market orders never rest, whatever their TIF.
@@ -64,6 +84,15 @@ Defaults chosen for open questions (each is easy to change):
 - Q6g: lines are pools owned by one giver and shared by whichever relationships and instruments map to them.
 - Q6h: a limit cut below usage blocks trades that increase exposure; trades that reduce exposure are still allowed.
 - A missing USD rate or value date blocks DSL/NOP lines; UNLIMITED lines still work.
+- Q3b/Q4f: discretion is applied to the raw reference (the mid may be half a tick), then rounded defensively. A mid trade's price is the valid price nearest the raw mid within both limits; on a tie, the resting order gets the better price.
+- Q4e: peg ticks fall on a fixed grid (t = k × throttle). The reference is frozen per tick, and pegs are processed in arrival order.
+- Q5b: fixing credit is reserved at match time. Exposure is notional × USD rate, so the fixing price isn't needed.
+- Q5c: a fixing order names a fixing event, must be DAY, GTC or GTT, and can't be amended.
+- Q5e: fixing orders match continuously before cut-off, in time priority.
+- Q5f: a fixing match is reported at once without a price, then as a trade when the rate arrives.
+- Q5g: pending fixing matches wait for a rate; the next occurrence can't open until then.
+- Q21: mid TTL replaces min TTL for mid orders.
+- Q22: an engine reprice doesn't restart min TTL. A tick with an unchanged price keeps priority.
 - Q27–Q30: see below.
 
 **Phase 0 throughput spike: done** (`clob-bench`, results in `clob-bench/SPIKE-RESULTS.md`). On an Intel N100 development VM, one engine thread with a credit stub and output encoding runs at about 2.1M events/s flat out:
@@ -74,7 +103,7 @@ Defaults chosen for open questions (each is easy to change):
 
 **Decision:** stay on one shard for Phase 3, keep the engine shard-ready, and re-run the spike on production-class hardware before Phase 3 finishes. Sharding is triggered if load exceeds 50%, or p99 exceeds the latency target, at the agreed aggregate peak (Q11).
 
-Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: JMH benchmarks, Phase 4 onwards, book-delta output for market data, and the PEGGED/MID/FIXING order types (rejected as not implemented for now).
+Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: JMH benchmarks, Phase 5 onwards, and book-delta output for market data.
 
 ---
 
@@ -437,3 +466,6 @@ Status key: ✅ answered · 🟡 partly answered, follow-ups listed · ❓ open.
 31. ❓ **Credit changes and crossed books.** If a credit change (a new relationship, a raised limit or a value-date roll) makes crossed resting orders tradable, should they match straight away? If so, which order is the aggressor and at what price? Today they stay crossed until one of them is amended or a new order arrives.
 32. ❓ **Who owns a credit pool.** The engine assumes a line (pool) is credit extended by *one* account, shared across that account's counterparties and instruments. Is that how pools work? Should a pool ever span several giving accounts, for example accounts in the same legal entity?
 33. ❓ **Value dates and USD rates source.** For now both arrive as sequenced inputs. Should the CLOB compute value dates from holiday calendars itself (Phase 1 plan), or receive them from a reference-data service? Which rate source and update frequency should credit use (Q6d)?
+34. ❓ **Mid reference.** Mid orders use the same reference as pegs: the visible top of book *excluding peg orders*. That stops pegs moving the mid. Should the mid include visible peg orders instead?
+35. ❓ **When pegs suspend.** Pegs are checked only on peg ticks. So if one side of the book empties between ticks, resting pegs keep their last price for up to one throttle interval (20ms) before suspending. Is that acceptable, or must they suspend immediately?
+36. ❓ **Mid priority.** Among mid orders that cross, priority is pure time. Should a more aggressive discretion win over an older but less aggressive order?

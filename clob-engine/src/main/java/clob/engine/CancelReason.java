@@ -10,5 +10,7 @@ public enum CancelReason {
     /** Positive residual below min quantity after a fill (confirmed rule, PLAN Q6f). */
     RESIDUAL_BELOW_MIN_QTY,
     EXPIRED,
-    END_OF_DAY
+    END_OF_DAY,
+    /** FIXING: unmatched quantity at the event's cut-off. */
+    FIXING_CUTOFF
 }

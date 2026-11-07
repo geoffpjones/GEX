@@ -14,17 +14,23 @@ final class PriceLevel {
     long visibleQty;
     /** Hidden orders' leaves plus iceberg reserves. */
     long hiddenQty;
+    /** Displayed quantity belonging to peg orders (excluded from peg and mid reference prices). */
+    long pegVisibleQty;
     int orderCount;
 
     void reset(long price) {
         this.price = price;
         visHead = visTail = hidHead = hidTail = null;
-        visibleQty = hiddenQty = 0;
+        visibleQty = hiddenQty = pegVisibleQty = 0;
         orderCount = 0;
     }
 
     boolean isEmpty() {
         return orderCount == 0;
+    }
+
+    boolean hasNonPegVisible() {
+        return visibleQty > pegVisibleQty;
     }
 
     void addVisible(Order o) {
@@ -39,6 +45,9 @@ final class PriceLevel {
         }
         visTail = o;
         visibleQty += o.displayQty;
+        if (o.type == clob.refdata.OrderType.PEGGED) {
+            pegVisibleQty += o.displayQty;
+        }
         hiddenQty += o.leaves - o.displayQty;
         orderCount++;
     }
@@ -72,6 +81,9 @@ final class PriceLevel {
             }
             visibleQty -= o.displayQty;
             hiddenQty -= o.leaves - o.displayQty;
+            if (o.type == clob.refdata.OrderType.PEGGED) {
+                pegVisibleQty -= o.displayQty;
+            }
         } else {
             if (o.prev == null) {
                 hidHead = o.next;
@@ -95,6 +107,9 @@ final class PriceLevel {
     void adjust(Order o, long newLeaves, long newDisplay) {
         if (o.inVisibleQueue) {
             visibleQty += newDisplay - o.displayQty;
+            if (o.type == clob.refdata.OrderType.PEGGED) {
+                pegVisibleQty += newDisplay - o.displayQty;
+            }
             hiddenQty += (newLeaves - newDisplay) - (o.leaves - o.displayQty);
         } else {
             hiddenQty += newLeaves - o.leaves;

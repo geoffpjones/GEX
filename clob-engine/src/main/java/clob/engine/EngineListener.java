@@ -24,4 +24,17 @@ public interface EngineListener {
 
     /** A cancel or replace held until {@code releaseTime} (min TTL). */
     void onRequestQueued(long time, long orderId, RequestType type, long releaseTime);
+
+    /** A peg order moved to a new price, or resumed after suspension. It has new time priority. */
+    void onOrderRepriced(long time, long orderId, long price);
+
+    /** A peg order left the book because its reference price is unavailable. It is not cancelled. */
+    void onOrderSuspended(long time, long orderId);
+
+    /**
+     * Two fixing orders matched; the price follows when the fixing rate arrives, as an
+     * {@link #onTrade} with the same id ({@code matchId}) and leaves of -1.
+     */
+    void onFixingMatched(long time, long matchId, int instrumentId, int fixingEventId, long aggressorOrderId,
+            long passiveOrderId, Side aggressorSide, long qty, long aggressorLeaves, long passiveLeaves);
 }

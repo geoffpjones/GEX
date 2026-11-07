@@ -13,6 +13,7 @@ public final class RefData {
     private final List<Instrument> instruments;
     private final Map<String, Instrument> byKey;
     private final LongHashSet entitlements;
+    private final FixingEvent[] fixingEvents;
 
     private RefData(Builder b) {
         int maxId = -1;
@@ -28,6 +29,23 @@ public final class RefData {
         instruments = Collections.unmodifiableList(new ArrayList<>(b.instruments));
         entitlements = new LongHashSet();
         entitlements.addAll(b.entitlements);
+        int maxEvent = -1;
+        for (FixingEvent e : b.fixingEvents) {
+            maxEvent = Math.max(maxEvent, e.id());
+        }
+        fixingEvents = new FixingEvent[maxEvent + 1];
+        for (FixingEvent e : b.fixingEvents) {
+            fixingEvents[e.id()] = e;
+        }
+    }
+
+    public FixingEvent fixingEvent(int id) {
+        return id >= 0 && id < fixingEvents.length ? fixingEvents[id] : null;
+    }
+
+    /** One more than the largest fixing event id. */
+    public int fixingEventCapacity() {
+        return fixingEvents.length;
     }
 
     public Instrument instrument(int id) {
@@ -64,6 +82,16 @@ public final class RefData {
         private final Map<Integer, Instrument> ids = new HashMap<>();
         private final Map<String, Instrument> keys = new HashMap<>();
         private final LongHashSet entitlements = new LongHashSet();
+        private final List<FixingEvent> fixingEvents = new ArrayList<>();
+        private final Map<Integer, FixingEvent> fixingIds = new HashMap<>();
+
+        public Builder addFixingEvent(FixingEvent event) {
+            if (fixingIds.putIfAbsent(event.id(), event) != null) {
+                throw new IllegalArgumentException("Duplicate fixing event id " + event.id());
+            }
+            fixingEvents.add(event);
+            return this;
+        }
 
         public Builder add(Instrument instrument) {
             if (ids.putIfAbsent(instrument.id(), instrument) != null) {

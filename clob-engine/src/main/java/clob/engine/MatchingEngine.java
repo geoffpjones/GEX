@@ -21,10 +21,11 @@ import org.agrona.collections.Long2ObjectHashMap;
  * order). A timer due exactly at {@code t} therefore fires before an input stamped {@code t}
  * (half-open windows, PLAN Q18 proposal).
  *
- * <p>Implemented so far (Phases 1–3): LIMIT, MARKET and ICEBERG orders; DAY, GTC, GTT, IOC and FOK;
- * VISIBILITY and PRICE priority; min qty/increment on every fill with residual cancellation;
- * cancel, cancel/replace and mass cancel with min TTL (reject or queue); bilateral credit with
- * partial fills clipped to headroom. Pegs, mid, fixing and races come in later phases.
+ * <p>Implemented so far (Phases 1–4): LIMIT, MARKET, ICEBERG, PEGGED ({@link PegManager}), MID
+ * ({@link MidMatcher}) and FIXING ({@link FixingDesk}) orders; DAY, GTC, GTT, IOC and FOK; VISIBILITY
+ * and PRICE priority; min qty/increment on every fill with residual cancellation; cancel,
+ * cancel/replace and mass cancel with min TTL (reject or queue); bilateral credit with partial
+ * fills clipped to headroom. Fairness races come in Phase 5.
  *
  * <p>Credit in matching: the walk skips resting orders whose account is not bilaterally eligible
  * with the aggressor, or whose remaining credit cannot cover a minimum-size fill, and clips fills
@@ -33,12 +34,17 @@ import org.agrona.collections.Long2ObjectHashMap;
  * Q31 default).
  */
 public final class MatchingEngine {
-    private static final byte TIMER_GTT = 1;
-    private static final byte TIMER_TTL = 2;
+    static final byte TIMER_GTT = 1;
+    static final byte TIMER_TTL = 2;
+    static final byte TIMER_PEG = 3;
+    static final byte TIMER_FIXING = 4;
 
     private final RefData refData;
-    private final CreditEngine credit;
-    private final EngineListener listener;
+    final CreditEngine credit;
+    final EngineListener listener;
+    private final PegManager pegs;
+    private final MidMatcher mid;
+    private final FixingDesk fixing;
     private final OrderBook[] books;
     private final Long2ObjectHashMap<Order> orders;
     private final OrderPool orderPool;
@@ -64,6 +70,9 @@ public final class MatchingEngine {
         this.orderPool = new OrderPool(config.initialOrders(), config.maxLiveOrders());
         this.levelPool = new LevelPool(config.initialLevels());
         this.timers = new TimerQueue(config.initialTimers());
+        this.pegs = new PegManager(this);
+        this.mid = new MidMatcher(this);
+        this.fixing = new FixingDesk(this, refData);
     }
 
     // ------------------------------------------------------------------ inputs
@@ -98,9 +107,19 @@ public final class MatchingEngine {
         o.maxShow = normaliseShow(c.maxShow);
         o.expireTime = c.tif == TimeInForce.GTT ? c.expireTime : 0;
         o.ttlStart = time;
+        o.discretion = c.discretion;
+        o.pegReference = c.pegReference;
+        o.fixingEventId = c.fixingEventId;
+        OrderBook book = books[o.instrumentId];
         orders.put(o.orderId, o);
         listener.onOrderAccepted(time, o.orderId);
-        process(o, books[o.instrumentId], time);
+        if (o.type == OrderType.PEGGED) {
+            o.price = PegManager.pegPrice(o, book);
+            pegs.link(book, o);
+            pegs.ensureTick(book, time);
+        }
+        process(o, book, time);
+        mid.check(book, time);
     }
 
     public void onCancel(long orderId, int userId, CancelSource source, long time) {
@@ -114,7 +133,9 @@ public final class MatchingEngine {
             listener.onRequestRejected(time, orderId, RequestType.CANCEL, RequestRejectReason.NOT_ENTITLED);
             return;
         }
+        OrderBook book = books[o.instrumentId];
         requestCancel(o, source, time);
+        mid.check(book, time);
     }
 
     public void onReplace(ReplaceCommand c, long time) {
@@ -129,6 +150,7 @@ public final class MatchingEngine {
             return;
         }
         long maxShow = normaliseShow(c.maxShow);
+        OrderBook book = books[o.instrumentId];
         RequestRejectReason reason = validateReplace(o, c.price, c.qty, maxShow);
         if (reason == null && o.pendingType == RequestType.CANCEL) {
             reason = RequestRejectReason.CANCEL_ALREADY_PENDING;
@@ -154,10 +176,12 @@ public final class MatchingEngine {
             o.pendingPrice = c.price;
             o.pendingQty = c.qty;
             o.pendingMaxShow = maxShow;
+            o.pendingDiscretion = c.discretion;
             listener.onRequestQueued(time, o.orderId, RequestType.REPLACE, release);
             return;
         }
-        applyReplace(o, c.price, c.qty, maxShow, time);
+        applyReplace(o, c.price, c.qty, maxShow, c.discretion, time);
+        mid.check(book, time);
     }
 
     /**
@@ -181,6 +205,7 @@ public final class MatchingEngine {
             requestCancel(scratch.get(i), source, time);
         }
         scratch.clear();
+        checkAllMid(time);
     }
 
     // ------------------------------------------------------------------ credit inputs (sequenced)
@@ -222,6 +247,25 @@ public final class MatchingEngine {
             cancelResting(scratch.get(i), CancelReason.END_OF_DAY, time);
         }
         scratch.clear();
+        checkAllMid(time);
+    }
+
+    // ------------------------------------------------------------------ fixing inputs (sequenced)
+
+    /**
+     * Opens the next occurrence of a fixing event. Instants come from the event's time zone
+     * ({@link clob.refdata.FixingEvent#occurrenceOn}). False if the event is unknown, already open,
+     * still awaiting a rate, or the times are invalid.
+     */
+    public boolean onFixingSchedule(int fixingEventId, long cutoffTime, long fixingTime, long time) {
+        advanceTo(time);
+        return fixing.schedule(fixingEventId, cutoffTime, fixingTime, time);
+    }
+
+    /** The externally sourced fixing rate. Prices every pending match. False if none awaits a rate. */
+    public boolean onFixingRate(int fixingEventId, int instrumentId, long rate, long time) {
+        advanceTo(time);
+        return fixing.rate(fixingEventId, instrumentId, rate, time);
     }
 
     // ------------------------------------------------------------------ diagnostics
@@ -267,14 +311,29 @@ public final class MatchingEngine {
         if (!instrument.supportedTifs().contains(c.tif)) {
             return RejectReason.UNSUPPORTED_TIF;
         }
-        if (c.type != OrderType.LIMIT && c.type != OrderType.MARKET && c.type != OrderType.ICEBERG) {
-            return RejectReason.ORDER_TYPE_NOT_IMPLEMENTED;
-        }
         if (!instrument.isValidQty(c.qty)) {
             return RejectReason.INVALID_QUANTITY;
         }
-        if (c.type != OrderType.MARKET && !instrument.isValidPrice(c.price)) {
+        if ((c.type == OrderType.LIMIT || c.type == OrderType.ICEBERG) && !instrument.isValidPrice(c.price)) {
             return RejectReason.INVALID_PRICE;
+        }
+        if (c.type == OrderType.PEGGED) {
+            if (c.pegReference == null) {
+                return RejectReason.MISSING_FIELD;
+            }
+            if (PegManager.pegPrice(c.side, c.pegReference, c.discretion, books[c.instrumentId].referenceBid(),
+                    books[c.instrumentId].referenceAsk(), instrument) == PegManager.NO_PRICE) {
+                return RejectReason.PEG_REFERENCE_UNAVAILABLE;
+            }
+        }
+        if (c.type == OrderType.MID && c.maxShow != NewOrderCommand.FULLY_VISIBLE) {
+            return RejectReason.INVALID_SHOW;
+        }
+        if (c.type == OrderType.FIXING) {
+            RejectReason r = fixing.validate(c, time);
+            if (r != null) {
+                return r;
+            }
         }
         if (c.type == OrderType.ICEBERG && c.maxShow == NewOrderCommand.FULLY_VISIBLE) {
             return RejectReason.INVALID_SHOW;
@@ -290,8 +349,14 @@ public final class MatchingEngine {
 
     private RequestRejectReason validateReplace(Order o, long price, long qty, long maxShow) {
         Instrument instrument = books[o.instrumentId].instrument;
-        if (!instrument.isValidPrice(price)) {
+        if (o.type == OrderType.FIXING || o.type == OrderType.MARKET) {
+            return RequestRejectReason.NOT_REPLACEABLE;
+        }
+        if ((o.type == OrderType.LIMIT || o.type == OrderType.ICEBERG) && !instrument.isValidPrice(price)) {
             return RequestRejectReason.INVALID_PRICE;
+        }
+        if (o.type == OrderType.MID && maxShow != Order.FULLY_VISIBLE) {
+            return RequestRejectReason.INVALID_SHOW;
         }
         if (!instrument.isValidQty(qty)) {
             return RequestRejectReason.INVALID_QUANTITY;
@@ -315,14 +380,24 @@ public final class MatchingEngine {
         return maxShow == NewOrderCommand.FULLY_VISIBLE ? Order.FULLY_VISIBLE : maxShow;
     }
 
+    /** Mid orders use mid TTL instead of min TTL (PLAN Q21 default). */
     private static long ttlFor(Order o, Instrument instrument) {
-        return instrument.minTtlNanos();
+        return o.type == OrderType.MID ? instrument.midTtlNanos() : instrument.minTtlNanos();
     }
 
     // ------------------------------------------------------------------ order flow
 
-    /** Matches an incoming (or re-entering) order, then rests or terminates it according to type and TIF. */
+    /** Routes a new or re-entering order to its book. */
     private void process(Order o, OrderBook book, long time) {
+        switch (o.type) {
+            case MID -> mid.process(o, book, time);
+            case FIXING -> fixing.process(o, book, time);
+            default -> processBook(o, book, time);
+        }
+    }
+
+    /** Matches an order against the price ladder, then rests or terminates it according to type and TIF. */
+    void processBook(Order o, OrderBook book, long time) {
         if (o.tif == TimeInForce.FOK && simulator.fillable(o, book) < o.leaves) {
             terminate(o, CancelReason.FOK_UNFILLED, time);
             return;
@@ -467,6 +542,9 @@ public final class MatchingEngine {
         if (passive.inVisibleQueue) {
             passive.displayQty -= qty;
             level.visibleQty -= qty;
+            if (passive.type == OrderType.PEGGED) {
+                level.pegVisibleQty -= qty;
+            }
         } else {
             level.hiddenQty -= qty;
         }
@@ -506,9 +584,44 @@ public final class MatchingEngine {
             o.displayQty = Math.min(o.maxShow, o.leaves);
             level.addVisible(o);
         }
+        scheduleGtt(o);
+    }
+
+    void scheduleGtt(Order o) {
         if (o.tif == TimeInForce.GTT && !o.gttScheduled) {
             timers.schedule(o.expireTime, TIMER_GTT, o.orderId);
             o.gttScheduled = true;
+        }
+    }
+
+    /** Takes a resting order off the price ladder (not a cancel). */
+    void removeFromBook(Order o) {
+        PriceLevel level = o.level;
+        level.remove(o);
+        books[o.instrumentId].side(o.side).removeIfEmpty(level, levelPool);
+    }
+
+    void schedule(long time, byte kind, long id) {
+        timers.schedule(time, kind, id);
+    }
+
+    Order order(long orderId) {
+        return orders.get(orderId);
+    }
+
+    long nextTradeId() {
+        return ++lastTradeId;
+    }
+
+    long nextPrioritySeq() {
+        return ++lastPrioritySeq;
+    }
+
+    private void checkAllMid(long time) {
+        for (OrderBook book : books) {
+            if (book != null) {
+                mid.check(book, time);
+            }
         }
     }
 
@@ -541,10 +654,36 @@ public final class MatchingEngine {
         cancelResting(o, CancelReason.PARTICIPANT, time);
     }
 
-    private void applyReplace(Order o, long price, long qty, long maxShow, long time) {
+    private void applyReplace(Order o, long price, long qty, long maxShow, long discretion, long time) {
         OrderBook book = books[o.instrumentId];
         long newLeaves = qty - o.cumQty;
         o.ttlStart = time; // an applied amend restarts min TTL (confirmed, PLAN Q14a)
+        if (o.type == OrderType.MID) {
+            if (qty <= o.qty && discretion == o.discretion) {
+                o.qty = qty;
+                o.leaves = newLeaves;
+                listener.onOrderReplaced(time, o.orderId, o.price, o.qty, o.leaves);
+                return;
+            }
+            o.queue.remove(o);
+            o.qty = qty;
+            o.leaves = newLeaves;
+            o.discretion = discretion;
+            listener.onOrderReplaced(time, o.orderId, o.price, o.qty, o.leaves);
+            mid.process(o, book, time);
+            return;
+        }
+        if (o.type == OrderType.PEGGED) {
+            price = o.price; // a peg's price only moves on a peg tick
+            o.discretion = discretion; // takes effect at the next tick, respecting the throttle
+            if (o.suspended) {
+                o.qty = qty;
+                o.leaves = newLeaves;
+                o.maxShow = maxShow;
+                listener.onOrderReplaced(time, o.orderId, o.price, o.qty, o.leaves);
+                return;
+            }
+        }
         boolean keepPriority = price == o.price && qty <= o.qty && maxShow == o.maxShow;
         if (keepPriority) {
             o.level.adjust(o, newLeaves, o.inVisibleQueue ? Math.min(o.displayQty, newLeaves) : 0);
@@ -564,26 +703,29 @@ public final class MatchingEngine {
     }
 
     /** Cancels an order that is not resting (an aggressor that will not rest). */
-    private void terminate(Order o, CancelReason reason, long time) {
+    void terminate(Order o, CancelReason reason, long time) {
         long qty = o.leaves;
         o.leaves = 0;
         listener.onOrderCancelled(time, o.orderId, reason, qty);
         release(o, time);
     }
 
-    private void cancelResting(Order o, CancelReason reason, long time) {
-        PriceLevel level = o.level;
-        if (level != null) {
-            level.remove(o);
-            books[o.instrumentId].side(o.side).removeIfEmpty(level, levelPool);
+    void cancelResting(Order o, CancelReason reason, long time) {
+        if (o.level != null) {
+            removeFromBook(o);
+        } else if (o.queue != null) {
+            o.queue.remove(o);
         }
         terminate(o, reason, time);
     }
 
     /** Final step for every order: answer any queued request, unregister and return to the pool. */
-    private void release(Order o, long time) {
+    void release(Order o, long time) {
         if (o.pendingType != null) {
             listener.onRequestRejected(time, o.orderId, o.pendingType, RequestRejectReason.TOO_LATE);
+        }
+        if (o.inPegList) {
+            pegs.unlink(books[o.instrumentId], o);
         }
         orders.remove(o.orderId);
         orderPool.release(o);
@@ -605,11 +747,27 @@ public final class MatchingEngine {
         }
     }
 
-    private void fire(byte kind, long orderId, long deadline) {
-        Order o = orders.get(orderId);
+    private void fire(byte kind, long id, long deadline) {
+        if (kind == TIMER_PEG) {
+            OrderBook book = books[(int) id];
+            pegs.onTick(book, deadline);
+            mid.check(book, deadline);
+            return;
+        }
+        if (kind == TIMER_FIXING) {
+            fixing.onCutoff((int) id, deadline);
+            return;
+        }
+        Order o = orders.get(id);
         if (o == null) {
             return; // order already finished
         }
+        OrderBook book = books[o.instrumentId];
+        fireOrderTimer(kind, o, deadline);
+        mid.check(book, deadline);
+    }
+
+    private void fireOrderTimer(byte kind, Order o, long deadline) {
         if (kind == TIMER_GTT) {
             if (o.expireTime == deadline && o.tif == TimeInForce.GTT) {
                 cancelResting(o, CancelReason.EXPIRED, deadline);
@@ -628,7 +786,7 @@ public final class MatchingEngine {
                 if (reason != null) {
                     listener.onRequestRejected(deadline, o.orderId, RequestType.REPLACE, reason);
                 } else {
-                    applyReplace(o, o.pendingPrice, o.pendingQty, o.pendingMaxShow, deadline);
+                    applyReplace(o, o.pendingPrice, o.pendingQty, o.pendingMaxShow, o.pendingDiscretion, deadline);
                 }
             }
         }
@@ -645,6 +803,22 @@ public final class MatchingEngine {
             }
             collectSide(book.bids, filter);
             collectSide(book.asks, filter);
+            collectQueue(book.midBuys, filter);
+            collectQueue(book.midSells, filter);
+            for (Order o = book.pegHead; o != null; o = o.pegNext) {
+                if (o.suspended && filter.test(o)) {
+                    scratch.add(o);
+                }
+            }
+        }
+        fixing.collect(filter, scratch);
+    }
+
+    private void collectQueue(OrderQueue queue, Predicate<Order> filter) {
+        for (Order o = queue.head; o != null; o = o.next) {
+            if (filter.test(o)) {
+                scratch.add(o);
+            }
         }
     }
 

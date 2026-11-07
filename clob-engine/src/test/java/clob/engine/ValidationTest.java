@@ -31,7 +31,7 @@ class ValidationTest {
     @Test void userNotEntitledToAccount() { s.buy(1).limit(90).qty(1000).user(2).account(3).send(); assertEquals(RejectReason.NOT_ENTITLED, rejection()); }
     @Test void unsupportedType() { s.buy(1).market().qty(1000).send(); assertEquals(RejectReason.UNSUPPORTED_ORDER_TYPE, rejection()); }
     @Test void unsupportedTif() { s.buy(1).limit(90).qty(1000).gtc().send(); assertEquals(RejectReason.UNSUPPORTED_TIF, rejection()); }
-    @Test void notYetImplementedType() { s.buy(1).type(OrderType.PEGGED).qty(1000).send(); assertEquals(RejectReason.ORDER_TYPE_NOT_IMPLEMENTED, rejection()); }
+    @Test void pegWithoutReference() { s.buy(1).type(OrderType.PEGGED).qty(1000).send(); assertEquals(RejectReason.MISSING_FIELD, rejection()); }
     @Test void priceOffIncrement() { s.buy(1).limit(92).qty(1000).send(); assertEquals(RejectReason.INVALID_PRICE, rejection()); }
     @Test void nonPositiveSpotPrice() { s.buy(1).limit(0).qty(1000).send(); assertEquals(RejectReason.INVALID_PRICE, rejection()); }
     @Test void qtyBelowMin() { s.buy(1).limit(90).qty(500).send(); assertEquals(RejectReason.INVALID_QUANTITY, rejection()); }

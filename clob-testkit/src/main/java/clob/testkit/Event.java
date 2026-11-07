@@ -24,4 +24,11 @@ public sealed interface Event {
     record RequestRejected(long time, long orderId, RequestType type, RequestRejectReason reason) implements Event {}
 
     record Queued(long time, long orderId, RequestType type, long releaseTime) implements Event {}
+
+    record Repriced(long time, long orderId, long price) implements Event {}
+
+    record Suspended(long time, long orderId) implements Event {}
+
+    record FixingMatched(long time, long matchId, int instrumentId, int fixingEventId, long aggressorOrderId,
+            long passiveOrderId, Side aggressorSide, long qty, long aggressorLeaves, long passiveLeaves) implements Event {}
 }

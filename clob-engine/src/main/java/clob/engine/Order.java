@@ -2,6 +2,7 @@ package clob.engine;
 
 import clob.common.Side;
 import clob.refdata.OrderType;
+import clob.refdata.PegReference;
 import clob.refdata.TimeInForce;
 
 /** Pooled, mutable order state. Package-private: only the engine touches it. */
@@ -37,6 +38,21 @@ final class Order {
     long pendingPrice;
     long pendingQty;
     long pendingMaxShow;
+    long pendingDiscretion;
+
+    /** PEGGED and MID: pips; positive is more aggressive. */
+    long discretion;
+    PegReference pegReference;
+    /** PEGGED: off the book because the reference is unavailable. */
+    boolean suspended;
+    /** PEGGED: membership of the book's peg list (arrival order). */
+    Order pegPrev;
+    Order pegNext;
+    boolean inPegList;
+    /** FIXING: the fixing event. */
+    int fixingEventId;
+    /** MID and FIXING: the queue holding the order (instead of a price level). */
+    OrderQueue queue;
 
     Order prev;
     Order next;
@@ -67,6 +83,15 @@ final class Order {
         pendingPrice = 0;
         pendingQty = 0;
         pendingMaxShow = 0;
+        pendingDiscretion = 0;
+        discretion = 0;
+        pegReference = null;
+        suspended = false;
+        pegPrev = null;
+        pegNext = null;
+        inPegList = false;
+        fixingEventId = 0;
+        queue = null;
         prev = null;
         next = null;
         level = null;

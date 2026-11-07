@@ -57,4 +57,21 @@ public final class RecordingListener implements EngineListener {
     public void onRequestQueued(long time, long orderId, RequestType type, long releaseTime) {
         events.add(new Event.Queued(time, orderId, type, releaseTime));
     }
+
+    @Override
+    public void onOrderRepriced(long time, long orderId, long price) {
+        events.add(new Event.Repriced(time, orderId, price));
+    }
+
+    @Override
+    public void onOrderSuspended(long time, long orderId) {
+        events.add(new Event.Suspended(time, orderId));
+    }
+
+    @Override
+    public void onFixingMatched(long time, long matchId, int instrumentId, int fixingEventId, long aggressorOrderId,
+            long passiveOrderId, Side aggressorSide, long qty, long aggressorLeaves, long passiveLeaves) {
+        events.add(new Event.FixingMatched(time, matchId, instrumentId, fixingEventId, aggressorOrderId,
+                passiveOrderId, aggressorSide, qty, aggressorLeaves, passiveLeaves));
+    }
 }

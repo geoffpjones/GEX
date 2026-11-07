@@ -83,6 +83,16 @@ final class BookSide {
         }
     }
 
+    /** Best price with displayed non-peg quantity, or {@code Long.MIN_VALUE} if none. */
+    long bestNonPegVisible() {
+        for (int i = 0; i < size; i++) {
+            if (levels[i].hasNonPegVisible()) {
+                return levels[i].price;
+            }
+        }
+        return Long.MIN_VALUE;
+    }
+
     /** Index of the best level with displayed quantity, or -1. */
     int firstVisibleIndex() {
         for (int i = 0; i < size; i++) {

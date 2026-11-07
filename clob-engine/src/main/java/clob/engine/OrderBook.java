@@ -11,6 +11,18 @@ public final class OrderBook {
     final BookSide bids;
     final BookSide asks;
 
+    /** Peg orders (resting or suspended), in arrival order. */
+    Order pegHead;
+    Order pegTail;
+    int pegCount;
+    boolean pegTickScheduled;
+
+    /** Mid book: matches only mid orders, in time priority. */
+    final OrderQueue midBuys = new OrderQueue();
+    final OrderQueue midSells = new OrderQueue();
+    long lastMidBid = Long.MIN_VALUE;
+    long lastMidAsk = Long.MIN_VALUE;
+
     OrderBook(Instrument instrument, int initialLevels) {
         this.instrument = instrument;
         this.bids = new BookSide(Side.BUY, initialLevels);
@@ -61,5 +73,28 @@ public final class OrderBook {
 
     public boolean isEmpty() {
         return bids.size() == 0 && asks.size() == 0;
+    }
+
+    /** Reference bid for pegs and mid orders: best displayed non-peg bid, or {@code Long.MIN_VALUE}. */
+    public long referenceBid() {
+        return bids.bestNonPegVisible();
+    }
+
+    /** Reference offer for pegs and mid orders: best displayed non-peg offer, or {@code Long.MIN_VALUE}. */
+    public long referenceAsk() {
+        return asks.bestNonPegVisible();
+    }
+
+    /** Mid order ids in time priority. Allocates. */
+    public List<Long> midOrderIds(Side side) {
+        List<Long> ids = new ArrayList<>();
+        for (Order o = (side == Side.BUY ? midBuys : midSells).head; o != null; o = o.next) {
+            ids.add(o.orderId);
+        }
+        return ids;
+    }
+
+    public int pegCount() {
+        return pegCount;
     }
 }

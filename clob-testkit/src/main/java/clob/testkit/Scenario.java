@@ -10,10 +10,14 @@ import clob.engine.MatchingEngine;
 import clob.engine.NewOrderCommand;
 import clob.engine.OrderBook;
 import clob.engine.ReplaceCommand;
+import clob.refdata.FixingEvent;
 import clob.refdata.Instrument;
 import clob.refdata.OrderType;
+import clob.refdata.PegReference;
 import clob.refdata.RefData;
 import clob.refdata.TimeInForce;
+import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -40,6 +44,8 @@ public final class Scenario {
     public static final int PARTIES = 64;
     public static final int SPOT_DATE = 20_000;
     public static final int FAR_DATE = 20_030;
+    /** A fixing event available in every scenario ("TEST-FIX 16:00 London, cut-off 15:55"). */
+    public static final int FIXING_EVENT = 0;
     /** Line ids handed out by {@link #bilateral} start here, above the per-account unlimited lines. */
     private int nextLineId = 1_000;
 
@@ -60,7 +66,8 @@ public final class Scenario {
     }
 
     private static Scenario create(Instrument instrument) {
-        RefData.Builder b = RefData.builder().add(instrument);
+        RefData.Builder b = RefData.builder().add(instrument).addFixingEvent(new FixingEvent(FIXING_EVENT,
+                "TEST-FIX", LocalTime.of(16, 0), ZoneId.of("Europe/London"), LocalTime.of(15, 55)));
         for (int i = 1; i <= PARTIES; i++) {
             b.entitle(i, i);
         }
@@ -130,6 +137,17 @@ public final class Scenario {
 
     public CreditEngine credit() {
         return engine.credit();
+    }
+
+    // ---------------------------------------------------------------- fixing
+
+    /** Opens the next occurrence of {@link #FIXING_EVENT}. */
+    public boolean fixingSchedule(long cutoffTime, long fixingTime) {
+        return engine.onFixingSchedule(FIXING_EVENT, cutoffTime, fixingTime, now);
+    }
+
+    public boolean fixingRate(long rate) {
+        return engine.onFixingRate(FIXING_EVENT, instrument.id(), rate, now);
     }
 
     // ---------------------------------------------------------------- time
@@ -271,6 +289,9 @@ public final class Scenario {
         int account;
         int user;
         int instrumentId = instrument.id();
+        long discretion;
+        PegReference pegReference;
+        int fixingEventId = -1;
 
         OrderSpec(long id, Side side) {
             this.id = id;
@@ -284,6 +305,10 @@ public final class Scenario {
         public OrderSpec market() { this.type = OrderType.MARKET; this.price = 0; return this; }
         public OrderSpec iceberg(long price, long maxShow) { this.type = OrderType.ICEBERG; this.price = price; this.show = maxShow; return this; }
         public OrderSpec type(OrderType type) { this.type = type; return this; }
+        public OrderSpec peg(PegReference reference, long discretion) { this.type = OrderType.PEGGED; this.pegReference = reference; this.discretion = discretion; return this; }
+        public OrderSpec mid(long discretion) { this.type = OrderType.MID; this.discretion = discretion; return this; }
+        public OrderSpec fixing() { this.type = OrderType.FIXING; this.fixingEventId = FIXING_EVENT; return this; }
+        public OrderSpec discretion(long discretion) { this.discretion = discretion; return this; }
         public OrderSpec price(long price) { this.price = price; return this; }
         public OrderSpec qty(long qty) { this.qty = qty; return this; }
         public OrderSpec show(long show) { this.show = show; return this; }
@@ -310,6 +335,9 @@ public final class Scenario {
             c.qty = qty;
             c.maxShow = show;
             c.expireTime = expireTime;
+            c.discretion = discretion;
+            c.pegReference = pegReference;
+            c.fixingEventId = fixingEventId;
             sent.put(id, this);
             engine.onNewOrder(c, now);
             return Scenario.this;
@@ -323,6 +351,7 @@ public final class Scenario {
         private long qty;
         private long show;
         private int user;
+        private long discretion;
 
         ReplaceSpec(OrderSpec order) {
             this.order = order;
@@ -330,7 +359,10 @@ public final class Scenario {
             this.qty = order.qty;
             this.show = order.show;
             this.user = order.user;
+            this.discretion = order.discretion;
         }
+
+        public ReplaceSpec discretion(long discretion) { this.discretion = discretion; return this; }
 
         public ReplaceSpec price(long price) { this.price = price; return this; }
         public ReplaceSpec qty(long qty) { this.qty = qty; return this; }
@@ -344,10 +376,12 @@ public final class Scenario {
             c.price = price;
             c.qty = qty;
             c.maxShow = show;
+            c.discretion = discretion;
             engine.onReplace(c, now);
             order.price = price;
             order.qty = qty;
             order.show = show;
+            order.discretion = discretion;
             return Scenario.this;
         }
     }

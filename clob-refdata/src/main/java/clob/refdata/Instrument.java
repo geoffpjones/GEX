@@ -37,13 +37,18 @@ public record Instrument(
         long makerRaceNanos,
         long takerRaceNanos,
         boolean queueCancels,
-        boolean rejectOnTtl) {
+        boolean rejectOnTtl,
+        String baseCurrency,
+        String termCurrency) {
 
     public Instrument {
         Objects.requireNonNull(symbol, "symbol");
         Objects.requireNonNull(tenor, "tenor");
         Objects.requireNonNull(type, "type");
         Objects.requireNonNull(matchPriority, "matchPriority");
+        Objects.requireNonNull(baseCurrency, "baseCurrency");
+        Objects.requireNonNull(termCurrency, "termCurrency");
+        require(!baseCurrency.isBlank() && !termCurrency.isBlank(), "base and term currencies are required");
         require(id >= 0, "id must be >= 0");
         require(!symbol.isBlank() && !tenor.isBlank(), "symbol and tenor are required");
         require(pricePrecision >= 0 && pricePrecision <= 12, "pricePrecision must be 0..12");
@@ -141,11 +146,18 @@ public record Instrument(
         private long takerRaceNanos = 0;
         private boolean queueCancels = false;
         private boolean rejectOnTtl = false;
+        private String baseCurrency;
+        private String termCurrency;
 
         private Builder(int id, String symbol, String tenor) {
             this.id = id;
             this.symbol = symbol;
             this.tenor = tenor;
+            int slash = symbol == null ? -1 : symbol.indexOf('/');
+            if (slash > 0 && slash < symbol.length() - 1) {
+                this.baseCurrency = symbol.substring(0, slash);
+                this.termCurrency = symbol.substring(slash + 1);
+            }
         }
 
         public Builder type(InstrumentType v) { this.type = v; return this; }
@@ -168,12 +180,14 @@ public record Instrument(
         public Builder takerRaceNanos(long v) { this.takerRaceNanos = v; return this; }
         public Builder queueCancels(boolean v) { this.queueCancels = v; return this; }
         public Builder rejectOnTtl(boolean v) { this.rejectOnTtl = v; return this; }
+        /** Defaults from a symbol of the form BASE/TERM. */
+        public Builder currencies(String base, String term) { this.baseCurrency = base; this.termCurrency = term; return this; }
 
         public Instrument build() {
             return new Instrument(id, symbol, tenor, type, pricePrecision, priceIncrement, minTtlNanos, minQty,
                     maxQty, qtyIncrement, minShow, mdPriceIncrement, mdIntervalNanos, mdLevels, pegThrottleNanos,
                     midTtlNanos, supportedTifs, supportedOrderTypes, matchPriority, makerRaceNanos, takerRaceNanos,
-                    queueCancels, rejectOnTtl);
+                    queueCancels, rejectOnTtl, baseCurrency, termCurrency);
         }
     }
 }

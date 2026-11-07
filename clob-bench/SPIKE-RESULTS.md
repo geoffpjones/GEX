@@ -70,9 +70,20 @@ Service time by event type (engine + credit + output, timed):
    - avoiding the timer-heap insert for queued cancels when TTL expiry can be computed from a per-book FIFO (TTL is uniform per instrument).
 4. **Allocation discipline holds**: zero steady-state allocation, so GC isn't a factor.
 
+## Phase 3 update: real credit in the matching walk
+
+With the credit stub replaced by `CreditEngine`, configured per directed pair as 10% none, 60% unlimited, 20% DSL (USD 50–500m) and 10% NOP (USD 100–1,000m):
+
+| Run | Result |
+|---|---|
+| Untimed throughput | 2.63M ev/s (same as an unlimited mesh, 2.64M) |
+| Timed, saturate | p50 323 · p99 1,766 · p99.9 5,283 ns |
+| Aggressive IOC | mean 1,245 ns (was 935): the walk skips ineligible orders and checks credit per fill |
+| Paced 1M/s | p50 361 · p99 8,471 ns |
+| Allocation | 0 bytes per event, no GCs |
+
 ## Not yet included (each will add cost)
 
-- Real credit inside the matching walk, including skipping ineligible orders in crossed books.
 - Fairness races.
 - Peg repricing storms (every peg re-evaluated every 20 ms tick).
 - Mid matching.

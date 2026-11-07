@@ -13,14 +13,16 @@ Source: `requirements.md`. This plan covers the architecture, the build phases, 
 
 ## Implementation status (2026-11-07)
 
-**Done: Phase 0 skeleton, Phase 1 (SPOT reference data and validation), Phase 2 core.** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 82 tests, all green.
+**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 113 tests, all green.
 
 | Module | Contents |
 |---|---|
 | `clob-common` | `Side`, `Prices` (decimal ↔ fixed-point ticks) |
-| `clob-refdata` | `Instrument` (all spec parameters, validated), `RefData` (instruments, user↔account entitlements) |
+| `clob-refdata` | `Instrument` (all spec parameters plus base/term currency, validated), `RefData` (instruments, user↔account entitlements) |
+| `clob-credit` | `CreditEngine`: lines (pools) with a giver, type and USD limit; relationships (default plus per-instrument overrides); DSL per value date, NOP net; exact USD×10⁸ arithmetic; dry-run overlay for FOK |
 | `clob-engine` | `MatchingEngine` (pure, single-threaded, no clock), array-based `BookSide`, intrusive `PriceLevel` FIFOs (displayed and hidden queues), pooled orders and levels, timer heap, `FillSimulator` for FOK |
-| `clob-testkit` | `Scenario` DSL (reads the requirements' `id\|side\|show\|price\|qty` tables), recorded events |
+| `clob-testkit` | `Scenario` DSL (reads the requirements' `id\|side\|show\|price\|qty` tables), credit setup helpers, recorded events |
+| `clob-bench` | Throughput/latency harness (`SPIKE-RESULTS.md`) |
 
 What the engine does today:
 - LIMIT, MARKET and ICEBERG orders, with all five TIFs.
@@ -34,12 +36,34 @@ Checks beyond the scenario tests:
 - A FOK/IOC equivalence test is mutation-checked: a planted simulator bug fails it.
 - A determinism test replays the same inputs and compares the outputs.
 
+Phase 3 credit, as built:
+- Credit is bilateral: a match needs a line in both directions for the instrument.
+- Lines are UNLIMITED, DSL or NOP. No credit means no line.
+- A line is a pool extended by one account (its giver). Any of the giver's relationships and instruments may share it.
+- The matching walk skips orders it can't trade with, and orders whose credit can't cover a minimum-size fill. It clips fills down to the largest valid size, so books can be crossed.
+- SWAPs consume DSL on both legs' dates.
+- Value dates and USD rates arrive as sequenced inputs. Value-date roll releases settled usage.
+- Credit admin changes (lines, relationships, rates, value dates) are sequenced engine inputs.
+- Self-trades are blocked because nobody has a credit line to themselves (see Q29).
+- The bench now uses the real credit engine (10% none, 60% unlimited, 20% DSL, 10% NOP per pair):
+  - throughput is unchanged at about 2.6M events/s untimed;
+  - aggressive IOCs are about 300 ns slower;
+  - allocation is still zero.
+
 Defaults chosen for open questions (each is easy to change):
 - Q6i: `minQty` must be a multiple of `qtyIncrement`.
 - Q7c: market orders never rest, whatever their TIF.
 - Q14a: participant mass cancels obey min TTL per order.
 - Q1c: refreshed iceberg slices count as displayed liquidity.
 - Q18: timers fire before inputs with the same timestamp.
+- Q1c (with credit): the visible top level is screened per aggressor. A level whose displayed orders the aggressor can't trade with doesn't count as its top.
+- Q6b: a SWAP's legs net to zero for NOP.
+- Q6c: NOP is a single signed USD figure per line, measured from the giver's side.
+- Q6d: USD amount = base notional × base currency's USD rate, kept exact. Usage is recorded at the trade-time rate and never revalued.
+- Q6e: not decided yet. It's needed for screened market data (Phase 8).
+- Q6g: lines are pools owned by one giver and shared by whichever relationships and instruments map to them.
+- Q6h: a limit cut below usage blocks trades that increase exposure; trades that reduce exposure are still allowed.
+- A missing USD rate or value date blocks DSL/NOP lines; UNLIMITED lines still work.
 - Q27–Q30: see below.
 
 **Phase 0 throughput spike: done** (`clob-bench`, results in `clob-bench/SPIKE-RESULTS.md`). On an Intel N100 development VM, one engine thread with a credit stub and output encoding runs at about 2.1M events/s flat out:
@@ -50,7 +74,7 @@ Defaults chosen for open questions (each is easy to change):
 
 **Decision:** stay on one shard for Phase 3, keep the engine shard-ready, and re-run the spike on production-class hardware before Phase 3 finishes. Sharding is triggered if load exceeds 50%, or p99 exceeds the latency target, at the agreed aggregate peak (Q11).
 
-Not built yet: JMH benchmarks, credit (Phase 3) and everything after it, book-delta output for market data, and the PEGGED/MID/FIXING order types (rejected as not implemented for now).
+Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: JMH benchmarks, Phase 4 onwards, book-delta output for market data, and the PEGGED/MID/FIXING order types (rejected as not implemented for now).
 
 ---
 
@@ -410,3 +434,6 @@ Status key: ✅ answered · 🟡 partly answered, follow-ups listed · ❓ open.
 28. ❓ **Locked or crossed books with hidden orders (VISIBILITY).** A sell at 93 can't match a hidden bid at 93 (by the confirmed rule), so if it isn't IOC it rests. The visible offer then sits at 93 against the hidden bid at 93, and the hidden order never trades as an aggressor. Is that intended, or should a resting hidden order match an incoming visible order at its price?
 29. ❓ **Self-trade prevention.** The spec doesn't mention it. Today an account can trade with itself. Should same-account (or same-user) matches be prevented, and how: cancel the resting order, cancel the incoming one, or cancel both?
 30. ❓ **Order id uniqueness.** The engine rejects ids that duplicate a *live* order. Should the gateway or sequencer guarantee ids are unique for the whole session (recommended), or should the engine also track ids of finished orders?
+31. ❓ **Credit changes and crossed books.** If a credit change (a new relationship, a raised limit or a value-date roll) makes crossed resting orders tradable, should they match straight away? If so, which order is the aggressor and at what price? Today they stay crossed until one of them is amended or a new order arrives.
+32. ❓ **Who owns a credit pool.** The engine assumes a line (pool) is credit extended by *one* account, shared across that account's counterparties and instruments. Is that how pools work? Should a pool ever span several giving accounts, for example accounts in the same legal entity?
+33. ❓ **Value dates and USD rates source.** For now both arrive as sequenced inputs. Should the CLOB compute value dates from holiday calendars itself (Phase 1 plan), or receive them from a reference-data service? Which rate source and update frequency should credit use (Q6d)?

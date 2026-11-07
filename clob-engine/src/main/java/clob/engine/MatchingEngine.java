@@ -1,6 +1,8 @@
 package clob.engine;
 
 import clob.common.Side;
+import clob.credit.CreditEngine;
+import clob.credit.CreditType;
 import clob.refdata.Instrument;
 import clob.refdata.MatchPriority;
 import clob.refdata.OrderType;
@@ -19,32 +21,41 @@ import org.agrona.collections.Long2ObjectHashMap;
  * order). A timer due exactly at {@code t} therefore fires before an input stamped {@code t}
  * (half-open windows, PLAN Q18 proposal).
  *
- * <p>Implemented so far (Phases 1–2): LIMIT, MARKET and ICEBERG orders; DAY, GTC, GTT, IOC and FOK;
+ * <p>Implemented so far (Phases 1–3): LIMIT, MARKET and ICEBERG orders; DAY, GTC, GTT, IOC and FOK;
  * VISIBILITY and PRICE priority; min qty/increment on every fill with residual cancellation;
- * cancel, cancel/replace and mass cancel with min TTL (reject or queue). Credit, pegs, mid,
- * fixing and races come in later phases.
+ * cancel, cancel/replace and mass cancel with min TTL (reject or queue); bilateral credit with
+ * partial fills clipped to headroom. Pegs, mid, fixing and races come in later phases.
+ *
+ * <p>Credit in matching: the walk skips resting orders whose account is not bilaterally eligible
+ * with the aggressor, or whose remaining credit cannot cover a minimum-size fill, and clips fills
+ * to the largest valid size within credit. The book may therefore be crossed between accounts that
+ * cannot trade. A credit change does not by itself trigger matching between resting orders (PLAN
+ * Q31 default).
  */
 public final class MatchingEngine {
     private static final byte TIMER_GTT = 1;
     private static final byte TIMER_TTL = 2;
 
     private final RefData refData;
+    private final CreditEngine credit;
     private final EngineListener listener;
     private final OrderBook[] books;
     private final Long2ObjectHashMap<Order> orders;
     private final OrderPool orderPool;
     private final LevelPool levelPool;
     private final TimerQueue timers;
-    private final FillSimulator simulator = new FillSimulator();
+    private final FillSimulator simulator;
     private final ArrayList<Order> scratch = new ArrayList<>();
 
     private long now = Long.MIN_VALUE;
     private long lastTradeId;
     private long lastPrioritySeq;
 
-    public MatchingEngine(RefData refData, EngineConfig config, EngineListener listener) {
+    public MatchingEngine(RefData refData, EngineConfig config, CreditEngine credit, EngineListener listener) {
         this.refData = refData;
+        this.credit = credit;
         this.listener = listener;
+        this.simulator = new FillSimulator(credit);
         this.books = new OrderBook[refData.instrumentCapacity()];
         for (Instrument instrument : refData.instruments()) {
             books[instrument.id()] = new OrderBook(instrument, config.initialLevelsPerSide());
@@ -172,6 +183,37 @@ public final class MatchingEngine {
         scratch.clear();
     }
 
+    // ------------------------------------------------------------------ credit inputs (sequenced)
+
+    /** Creates or modifies a credit line (pool) extended by {@code giver}. */
+    public void onCreditLine(int lineId, int giver, CreditType type, long limitUsd, long time) {
+        advanceTo(time);
+        credit.setLine(lineId, giver, type, limitUsd);
+    }
+
+    /** Maps the credit {@code from} extends to {@code to} (for one instrument, or {@link CreditEngine#ALL_INSTRUMENTS}). */
+    public void onCreditRelationship(int from, int to, int instrumentId, int lineId, long time) {
+        advanceTo(time);
+        credit.setRelationship(from, to, instrumentId, lineId);
+    }
+
+    public void onUsdRate(String currency, long rateE8, long time) {
+        advanceTo(time);
+        credit.setUsdRate(currency, rateE8);
+    }
+
+    /** Current value dates (epoch days) for an instrument; {@code far} is used for SWAPs only. */
+    public void onValueDates(int instrumentId, int near, int far, long time) {
+        advanceTo(time);
+        credit.setValueDates(instrumentId, near, far);
+    }
+
+    /** Releases settled credit usage for value dates before {@code today}. */
+    public void onValueDateRoll(int today, long time) {
+        advanceTo(time);
+        credit.rollValueDate(today);
+    }
+
     /** Cancels DAY orders. GTC orders roll with priority kept; GTT orders run to their expiry. */
     public void onEndOfDay(long time) {
         advanceTo(time);
@@ -197,6 +239,10 @@ public final class MatchingEngine {
 
     public int liveOrderCount() {
         return orders.size();
+    }
+
+    public CreditEngine credit() {
+        return credit;
     }
 
     // ------------------------------------------------------------------ validation
@@ -313,29 +359,34 @@ public final class MatchingEngine {
     }
 
     /**
-     * VISIBILITY: first fill only displayed liquidity at the best visible level. Hidden liquidity
-     * unlocks once that level's displayed quantity is exhausted (refreshed iceberg slices count as
-     * displayed, PLAN Q1c default). After that, and always under PRICE: price, then displayed before
-     * hidden, then time.
+     * VISIBILITY: hidden liquidity is locked until the aggressor has exhausted the visible top level.
+     * The top level is screened per aggressor: the best crossing level where it actually traded
+     * displayed quantity (levels whose displayed orders it cannot trade with are passed over,
+     * PLAN Q1c default). Refreshed iceberg slices count as displayed. After that, and always under
+     * PRICE: price, then displayed before hidden, then time.
      */
     private void match(Order agg, OrderBook book, long time) {
         BookSide opp = book.side(agg.side.opposite());
         if (book.instrument.matchPriority() == MatchPriority.VISIBILITY) {
-            int top = opp.firstVisibleIndex();
-            if (top < 0) {
-                return;
+            boolean unlocked = false;
+            int i = 0;
+            while (i < opp.size() && agg.leaves > 0) {
+                PriceLevel level = opp.levelAt(i);
+                if (!crosses(agg, level.price)) {
+                    break;
+                }
+                int fills = walkVisible(agg, level, book, time);
+                if (level.isEmpty()) {
+                    opp.removeAt(i, levelPool);
+                } else {
+                    i++;
+                }
+                if (fills > 0) {
+                    unlocked = true;
+                    break;
+                }
             }
-            PriceLevel level = opp.levelAt(top);
-            if (!crosses(agg, level.price)) {
-                return;
-            }
-            while (agg.leaves > 0 && level.visHead != null) {
-                fill(agg, level.visHead, level, book, time);
-            }
-            if (level.isEmpty()) {
-                opp.removeAt(top, levelPool);
-            }
-            if (agg.leaves == 0) {
+            if (!unlocked || agg.leaves == 0) {
                 return;
             }
         }
@@ -345,12 +396,8 @@ public final class MatchingEngine {
             if (!crosses(agg, level.price)) {
                 break;
             }
-            while (agg.leaves > 0 && level.visHead != null) {
-                fill(agg, level.visHead, level, book, time);
-            }
-            while (agg.leaves > 0 && level.hidHead != null) {
-                fill(agg, level.hidHead, level, book, time);
-            }
+            walkVisible(agg, level, book, time);
+            walkHidden(agg, level, book, time);
             if (level.isEmpty()) {
                 opp.removeAt(i, levelPool);
             } else {
@@ -359,10 +406,60 @@ public final class MatchingEngine {
         }
     }
 
-    private void fill(Order agg, Order passive, PriceLevel level, OrderBook book, long time) {
+    /** Fills against the displayed queue in FIFO order, skipping orders it cannot trade with. Returns fills made. */
+    private int walkVisible(Order agg, PriceLevel level, OrderBook book, long time) {
+        int fills = 0;
+        Order p = level.visHead;
+        while (p != null && agg.leaves > 0) {
+            Order next = p.next;
+            if (tryFill(agg, p, level, book, time)) {
+                fills++;
+                // A refreshed iceberg moves to the tail; if it was last, it is also next.
+                if (next == null && p.level == level && level.visTail == p) {
+                    next = p;
+                }
+            }
+            p = next;
+        }
+        return fills;
+    }
+
+    private void walkHidden(Order agg, PriceLevel level, OrderBook book, long time) {
+        Order p = level.hidHead;
+        while (p != null && agg.leaves > 0) {
+            Order next = p.next;
+            tryFill(agg, p, level, book, time);
+            p = next;
+        }
+    }
+
+    /** Fills as much as the queue, both orders and credit allow. False if this order must be skipped. */
+    private boolean tryFill(Order agg, Order passive, PriceLevel level, OrderBook book, long time) {
+        Instrument instrument = book.instrument;
+        long qty = Math.min(agg.leaves, passive.inVisibleQueue ? passive.displayQty : passive.leaves);
+        long cap = credit.capacity(agg.accountId, passive.accountId, instrument.id(), agg.side);
+        if (cap < qty) {
+            qty = roundDownToExecutionSize(cap, instrument);
+            if (qty == 0) {
+                return false;
+            }
+        }
+        fill(agg, passive, level, book, time, qty);
+        return true;
+    }
+
+    /** Largest valid execution size not above {@code qty}, or 0. */
+    static long roundDownToExecutionSize(long qty, Instrument instrument) {
+        long min = instrument.minQty();
+        if (qty < min) {
+            return 0;
+        }
+        return min + (qty - min) / instrument.qtyIncrement() * instrument.qtyIncrement();
+    }
+
+    private void fill(Order agg, Order passive, PriceLevel level, OrderBook book, long time, long qty) {
         long minQty = book.instrument.minQty();
-        long available = passive.inVisibleQueue ? passive.displayQty : passive.leaves;
-        long qty = Math.min(agg.leaves, available);
+        credit.commit(agg.accountId, passive.accountId, book.instrument.id(), agg.side, qty);
         agg.leaves -= qty;
         agg.cumQty += qty;
         passive.leaves -= qty;

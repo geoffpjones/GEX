@@ -1,6 +1,8 @@
 package clob.testkit;
 
 import clob.common.Side;
+import clob.credit.CreditEngine;
+import clob.credit.CreditType;
 import clob.engine.CancelSource;
 import clob.engine.EngineConfig;
 import clob.engine.MassCancelScope;
@@ -21,6 +23,12 @@ import java.util.Map;
  * Test DSL over one instrument. Users 1..{@value #PARTIES} are each entitled to the account with the
  * same number. Time starts at 0 and only moves when the test says so.
  *
+ * <p>Credit: {@link #of} gives every account an UNLIMITED line (id = account number) to every
+ * <em>other</em> account, so any two different accounts can trade and an account cannot trade with
+ * itself. {@link #withoutCredit} starts with no relationships. Either way the instrument's base
+ * currency has a USD rate of 1 and its value date is {@link #SPOT_DATE} (far date
+ * {@link #FAR_DATE} for a SWAP).
+ *
  * <pre>
  * Scenario s = Scenario.of(TestInstruments.visibility())
  *         .book("1|BUY|0|93|1000", "2|BUY|1000|92|1000");
@@ -30,6 +38,10 @@ import java.util.Map;
  */
 public final class Scenario {
     public static final int PARTIES = 64;
+    public static final int SPOT_DATE = 20_000;
+    public static final int FAR_DATE = 20_030;
+    /** Line ids handed out by {@link #bilateral} start here, above the per-account unlimited lines. */
+    private int nextLineId = 1_000;
 
     private final Instrument instrument;
     private final MatchingEngine engine;
@@ -41,15 +53,83 @@ public final class Scenario {
 
     private Scenario(Instrument instrument, RefData refData) {
         this.instrument = instrument;
-        this.engine = new MatchingEngine(refData, EngineConfig.defaults(), recorder);
+        this.engine = new MatchingEngine(refData, EngineConfig.defaults(), new CreditEngine(PARTIES, refData),
+                recorder);
+        engine.onUsdRate(instrument.baseCurrency(), CreditEngine.RATE_SCALE, 0);
+        engine.onValueDates(instrument.id(), SPOT_DATE, FAR_DATE, 0);
     }
 
-    public static Scenario of(Instrument instrument) {
+    private static Scenario create(Instrument instrument) {
         RefData.Builder b = RefData.builder().add(instrument);
         for (int i = 1; i <= PARTIES; i++) {
             b.entitle(i, i);
         }
         return new Scenario(instrument, b.build());
+    }
+
+    /** Every pair of different accounts can trade, without limit. */
+    public static Scenario of(Instrument instrument) {
+        Scenario s = create(instrument);
+        for (int a = 1; a <= PARTIES; a++) {
+            s.engine.onCreditLine(a, a, CreditType.UNLIMITED, 0, 0);
+            for (int b = 1; b <= PARTIES; b++) {
+                if (a != b) {
+                    s.engine.onCreditRelationship(a, b, CreditEngine.ALL_INSTRUMENTS, a, 0);
+                }
+            }
+        }
+        return s;
+    }
+
+    /** No credit relationships: nothing can trade until the test adds some. */
+    public static Scenario withoutCredit(Instrument instrument) {
+        return create(instrument);
+    }
+
+    // ---------------------------------------------------------------- credit
+
+    public Scenario creditLine(int lineId, int giver, CreditType type, long limitUsd) {
+        engine.onCreditLine(lineId, giver, type, limitUsd, now);
+        return this;
+    }
+
+    /** Credit {@code from} extends to {@code to} for every instrument without an override. */
+    public Scenario relationship(int from, int to, int lineId) {
+        engine.onCreditRelationship(from, to, CreditEngine.ALL_INSTRUMENTS, lineId, now);
+        return this;
+    }
+
+    public Scenario relationship(int from, int to, int instrumentId, int lineId) {
+        engine.onCreditRelationship(from, to, instrumentId, lineId, now);
+        return this;
+    }
+
+    /** Gives each of {@code a} and {@code b} a new line of the given type to the other. Returns the lines {a→b, b→a}. */
+    public int[] bilateral(int a, int b, CreditType type, long limitUsd) {
+        int ab = nextLineId++;
+        int ba = nextLineId++;
+        creditLine(ab, a, type, limitUsd).relationship(a, b, ab);
+        creditLine(ba, b, type, limitUsd).relationship(b, a, ba);
+        return new int[] {ab, ba};
+    }
+
+    public Scenario usdRate(String currency, long rateE8) {
+        engine.onUsdRate(currency, rateE8, now);
+        return this;
+    }
+
+    public Scenario valueDates(int near, int far) {
+        engine.onValueDates(instrument.id(), near, far, now);
+        return this;
+    }
+
+    public Scenario rollValueDate(int today) {
+        engine.onValueDateRoll(today, now);
+        return this;
+    }
+
+    public CreditEngine credit() {
+        return engine.credit();
     }
 
     // ---------------------------------------------------------------- time

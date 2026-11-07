@@ -1,6 +1,8 @@
 package clob.bench;
 
 import clob.common.Side;
+import clob.credit.CreditEngine;
+import clob.credit.CreditType;
 import clob.engine.CancelSource;
 import clob.engine.EngineConfig;
 import clob.engine.MatchingEngine;
@@ -68,9 +70,10 @@ public final class ThroughputSpike {
             rb.entitle(a, a);
         }
         RefData refData = rb.build();
-        SpikeListener listener = new SpikeListener(credit, accounts, 42);
+        SpikeListener listener = new SpikeListener();
         MatchingEngine engine = new MatchingEngine(refData, new EngineConfig(64_000, 1_000_000, 16_384, 64, 65_536),
-                listener);
+                new CreditEngine(accounts, refData), listener);
+        CreditSetup creditSetup = configureCredit(engine, refData, accounts, credit);
         FlowGenerator gen = new FlowGenerator(books, accounts, CHUNK, 7);
         Journal journal = "none".equals(journalPath) ? null : new Journal(journalPath, 256L << 20);
 
@@ -132,16 +135,66 @@ public final class ThroughputSpike {
         System.out.printf("outputs: accepted=%,d trades=%,d (%,d in run) cancels=%,d replaced=%,d queued=%,d requestRejects=%,d rejected=%,d%n",
                 listener.accepted, listener.trades, listener.trades - trades0, listener.cancels, listener.replaced,
                 listener.queued, listener.requestRejects, listener.rejected);
-        if (credit) {
-            System.out.printf("credit stub: %,d checks, %,d ineligible pairs%n", listener.creditChecks,
-                    listener.ineligiblePairs);
-        }
+        System.out.println("credit: " + creditSetup);
         int depth = 0;
         for (int b = 0; b < books; b++) {
             depth += engine.book(b).levelCount(Side.BUY) + engine.book(b).levelCount(Side.SELL);
         }
         System.out.printf("book state: %,d live orders, %.1f price levels per book%n", engine.liveOrderCount(),
                 (double) depth / books);
+    }
+
+    record CreditSetup(int none, int unlimited, int dsl, int nop) {
+        @Override
+        public String toString() {
+            int total = none + unlimited + dsl + nop;
+            return String.format("%,d directed pairs: %d%% none, %d%% unlimited, %d%% DSL, %d%% NOP", total,
+                    100 * none / total, 100 * unlimited / total, 100 * dsl / total, 100 * nop / total);
+        }
+    }
+
+    /**
+     * {@code realistic}: per directed pair, 10% no credit, 60% unlimited (one shared line per giver),
+     * 20% DSL (USD 50–500m), 10% NOP (USD 100m–1bn). Otherwise unlimited between every pair.
+     */
+    private static CreditSetup configureCredit(MatchingEngine engine, RefData refData, int accounts, boolean realistic) {
+        for (Instrument i : refData.instruments()) {
+            engine.onUsdRate(i.baseCurrency(), CreditEngine.RATE_SCALE, 0);
+            engine.onValueDates(i.id(), 20_000, -1, 0);
+        }
+        int none = 0;
+        int unlimited = 0;
+        int dsl = 0;
+        int nop = 0;
+        int nextLine = accounts + 1;
+        long r = 12345;
+        for (int a = 1; a <= accounts; a++) {
+            engine.onCreditLine(a, a, CreditType.UNLIMITED, 0, 0);
+            for (int b = 1; b <= accounts; b++) {
+                if (a == b) {
+                    continue;
+                }
+                r = r * 6364136223846793005L + 1442695040888963407L;
+                int roll = realistic ? (int) ((r >>> 33) % 100) : 50;
+                if (roll < 10) {
+                    none++;
+                } else if (roll < 70) {
+                    engine.onCreditRelationship(a, b, CreditEngine.ALL_INSTRUMENTS, a, 0);
+                    unlimited++;
+                } else if (roll < 90) {
+                    long limit = 50_000_000L * (1 + (r >>> 40) % 10);
+                    engine.onCreditLine(nextLine, a, CreditType.DSL, limit, 0);
+                    engine.onCreditRelationship(a, b, CreditEngine.ALL_INSTRUMENTS, nextLine++, 0);
+                    dsl++;
+                } else {
+                    long limit = 100_000_000L * (1 + (r >>> 40) % 10);
+                    engine.onCreditLine(nextLine, a, CreditType.NOP, limit, 0);
+                    engine.onCreditRelationship(a, b, CreditEngine.ALL_INSTRUMENTS, nextLine++, 0);
+                    nop++;
+                }
+            }
+        }
+        return new CreditSetup(none, unlimited, dsl, nop);
     }
 
     /** Feeds generated chunks into the engine, optionally journalling each input first. */

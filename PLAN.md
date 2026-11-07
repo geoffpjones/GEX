@@ -42,7 +42,15 @@ Defaults chosen for open questions (each is easy to change):
 - Q18: timers fire before inputs with the same timestamp.
 - Q27–Q30: see below.
 
-Not built yet: the Phase 0 throughput spike, JMH benchmarks, credit (Phase 3) and everything after it, book-delta output for market data, and the PEGGED/MID/FIXING order types (rejected as not implemented for now).
+**Phase 0 throughput spike: done** (`clob-bench`, results in `clob-bench/SPIKE-RESULTS.md`). On an Intel N100 development VM, one engine thread with a credit stub and output encoding runs at about 2.1M events/s flat out:
+- p50 is 322 ns, p99 1.35 µs and p99.9 2.7 µs;
+- steady-state allocation is zero, with no GCs;
+- latency is stable when paced at 1M/s, but the thread falls behind when paced at 2M/s;
+- the journal must run on its own thread (inline, it doubles the per-event cost).
+
+**Decision:** stay on one shard for Phase 3, keep the engine shard-ready, and re-run the spike on production-class hardware before Phase 3 finishes. Sharding is triggered if load exceeds 50%, or p99 exceeds the latency target, at the agreed aggregate peak (Q11).
+
+Not built yet: JMH benchmarks, credit (Phase 3) and everything after it, book-delta output for market data, and the PEGGED/MID/FIXING order types (rejected as not implemented for now).
 
 ---
 

@@ -39,7 +39,8 @@ import org.HdrHistogram.Histogram;
  * </ul>
  *
  * <p>Options: {@code --events N --warmup N --rate N --books N --accounts N --journal PATH|none
- * --credit true|false --timing true|false --priority VISIBILITY|PRICE --mode engine|journal|hiccup}.
+ * --credit true|false --timing true|false --priority VISIBILITY|PRICE --mode engine|journal|hiccup
+ * --takerRaceMicros N --makerRaceMicros N}.
  */
 public final class ThroughputSpike {
     private static final int CHUNK = 65_536;
@@ -55,6 +56,8 @@ public final class ThroughputSpike {
         boolean credit = Boolean.parseBoolean(opt.getOrDefault("credit", "true"));
         boolean timing = Boolean.parseBoolean(opt.getOrDefault("timing", "true"));
         MatchPriority priority = MatchPriority.valueOf(opt.getOrDefault("priority", "VISIBILITY"));
+        long takerRaceNanos = Long.parseLong(opt.getOrDefault("takerRaceMicros", "0")) * 1_000L;
+        long makerRaceNanos = Long.parseLong(opt.getOrDefault("makerRaceMicros", "0")) * 1_000L;
         long logicalStep = 1_000_000_000L / (rate > 0 ? rate : 2_000_000L);
 
         RefData.Builder rb = RefData.builder();
@@ -64,6 +67,7 @@ public final class ThroughputSpike {
                     .minQty(FlowGenerator.MIN_QTY).qtyIncrement(FlowGenerator.MIN_QTY).maxQty(100 * FlowGenerator.MIN_QTY)
                     .minTtlNanos(5_000_000L).rejectOnTtl(false)
                     .matchPriority(priority)
+                    .takerRaceNanos(takerRaceNanos).makerRaceNanos(makerRaceNanos).queueCancels(takerRaceNanos > 0)
                     .build());
         }
         for (int a = 1; a <= accounts; a++) {
@@ -71,7 +75,7 @@ public final class ThroughputSpike {
         }
         RefData refData = rb.build();
         SpikeListener listener = new SpikeListener();
-        MatchingEngine engine = new MatchingEngine(refData, new EngineConfig(64_000, 1_000_000, 16_384, 64, 65_536),
+        MatchingEngine engine = new MatchingEngine(refData, new EngineConfig(64_000, 1_000_000, 16_384, 64, 65_536, 42),
                 new CreditEngine(accounts, refData), listener);
         CreditSetup creditSetup = configureCredit(engine, refData, accounts, credit);
         FlowGenerator gen = new FlowGenerator(books, accounts, CHUNK, 7);
@@ -86,9 +90,9 @@ public final class ThroughputSpike {
             return;
         }
         Driver driver = new Driver(engine, gen, journal, logicalStep);
-        System.out.printf("config: events=%,d warmup=%,d rate=%s books=%d accounts=%d journal=%s credit=%s timing=%s priority=%s%n",
+        System.out.printf("config: events=%,d warmup=%,d rate=%s books=%d accounts=%d journal=%s credit=%s timing=%s priority=%s takerRace=%dus makerRace=%dus%n",
                 events, warmup, rate == 0 ? "saturate" : String.format("%,d/s", rate), books, accounts,
-                journal != null, credit, timing, priority);
+                journal != null, credit, timing, priority, takerRaceNanos / 1000, makerRaceNanos / 1000);
         System.out.printf("jvm: %s %s, gc=%s%n", System.getProperty("java.vm.name"), System.getProperty("java.version"),
                 gcNames());
 

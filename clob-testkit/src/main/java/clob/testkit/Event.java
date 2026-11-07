@@ -28,6 +28,11 @@ public sealed interface Event {
 
     record Repriced(long time, long orderId, long price) implements Event {}
 
+    record RaceStarted(long time, long raceId, int instrumentId, boolean taker, Side side, long price, long expiry,
+            long seed) implements Event {}
+
+    record JoinedRace(long time, long orderId, long raceId) implements Event {}
+
     record Suspended(long time, long orderId) implements Event {}
 
     record FixingMatched(long time, long matchId, int instrumentId, int fixingEventId, long aggressorOrderId,

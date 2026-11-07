@@ -111,8 +111,8 @@ final class PegManager {
         long ask = book.referenceAsk();
         for (int i = 0; i < n; i++) {
             Order o = engine.order(snapshot[i]);
-            if (o == null || !o.inPegList) {
-                continue;
+            if (o == null || !o.inPegList || o.queue != null) {
+                continue; // gone, or waiting in a race ticket
             }
             long price = pegPrice(o.side, o.pegReference, o.discretion, bid, ask, book.instrument);
             if (price == NO_PRICE) {

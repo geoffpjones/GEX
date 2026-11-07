@@ -25,7 +25,7 @@ import org.agrona.collections.Long2ObjectHashMap;
  * ({@link MidMatcher}) and FIXING ({@link FixingDesk}) orders; DAY, GTC, GTT, IOC and FOK; VISIBILITY
  * and PRICE priority; min qty/increment on every fill with residual cancellation; cancel,
  * cancel/replace and mass cancel with min TTL (reject or queue); bilateral credit with partial
- * fills clipped to headroom. Fairness races come in Phase 5.
+ * fills clipped to headroom; taker and maker fairness races ({@link RaceManager}).
  *
  * <p>Credit in matching: the walk skips resting orders whose account is not bilaterally eligible
  * with the aggressor, or whose remaining credit cannot cover a minimum-size fill, and clips fills
@@ -38,6 +38,7 @@ public final class MatchingEngine {
     static final byte TIMER_TTL = 2;
     static final byte TIMER_PEG = 3;
     static final byte TIMER_FIXING = 4;
+    static final byte TIMER_RACE = 5;
 
     private final RefData refData;
     final CreditEngine credit;
@@ -45,6 +46,9 @@ public final class MatchingEngine {
     private final PegManager pegs;
     private final MidMatcher mid;
     private final FixingDesk fixing;
+    private final RaceManager races;
+    /** True while a race lottery applies its orders: they must not re-enter a race. */
+    private boolean applyingRace;
     private final OrderBook[] books;
     private final Long2ObjectHashMap<Order> orders;
     private final OrderPool orderPool;
@@ -73,6 +77,7 @@ public final class MatchingEngine {
         this.pegs = new PegManager(this);
         this.mid = new MidMatcher(this);
         this.fixing = new FixingDesk(this, refData);
+        this.races = new RaceManager(this, config.randomSeed());
     }
 
     // ------------------------------------------------------------------ inputs
@@ -110,6 +115,7 @@ public final class MatchingEngine {
         o.discretion = c.discretion;
         o.pegReference = c.pegReference;
         o.fixingEventId = c.fixingEventId;
+        o.fresh = true;
         OrderBook book = books[o.instrumentId];
         orders.put(o.orderId, o);
         listener.onOrderAccepted(time, o.orderId);
@@ -159,16 +165,17 @@ public final class MatchingEngine {
             listener.onRequestRejected(time, c.orderId, RequestType.REPLACE, reason);
             return;
         }
-        Instrument instrument = books[o.instrumentId].instrument;
+        Instrument instrument = book.instrument;
         long release = o.ttlStart + ttlFor(o, instrument);
-        if (time < release) {
-            if (instrument.rejectOnTtl()) {
-                listener.onRequestRejected(time, c.orderId, RequestType.REPLACE, RequestRejectReason.INSIDE_MIN_TTL);
-                return;
-            }
+        boolean raceHold = instrument.queueCancels() && RaceManager.takerRaceRunning(book);
+        if (time < release && instrument.rejectOnTtl()) {
+            listener.onRequestRejected(time, c.orderId, RequestType.REPLACE, RequestRejectReason.INSIDE_MIN_TTL);
+            return;
+        }
+        if (time < release || raceHold) {
             if (o.pendingType == RequestType.REPLACE) {
                 listener.onRequestRejected(time, o.orderId, RequestType.REPLACE, RequestRejectReason.SUPERSEDED);
-            } else {
+            } else if (time < release) {
                 timers.schedule(release, TIMER_TTL, o.orderId);
             }
             o.pendingType = RequestType.REPLACE;
@@ -177,7 +184,8 @@ public final class MatchingEngine {
             o.pendingQty = c.qty;
             o.pendingMaxShow = maxShow;
             o.pendingDiscretion = c.discretion;
-            listener.onRequestQueued(time, o.orderId, RequestType.REPLACE, release);
+            hold(o, book, raceHold);
+            listener.onRequestQueued(time, o.orderId, RequestType.REPLACE, queuedUntil(o, book));
             return;
         }
         applyReplace(o, c.price, c.qty, maxShow, c.discretion, time);
@@ -352,6 +360,9 @@ public final class MatchingEngine {
         if (o.type == OrderType.FIXING || o.type == OrderType.MARKET) {
             return RequestRejectReason.NOT_REPLACEABLE;
         }
+        if (o.queue != null && o.type != OrderType.MID) {
+            return RequestRejectReason.PENDING_IN_RACE; // waiting in a race ticket (PLAN Q37 default)
+        }
         if ((o.type == OrderType.LIMIT || o.type == OrderType.ICEBERG) && !instrument.isValidPrice(price)) {
             return RequestRejectReason.INVALID_PRICE;
         }
@@ -398,6 +409,12 @@ public final class MatchingEngine {
 
     /** Matches an order against the price ladder, then rests or terminates it according to type and TIF. */
     void processBook(Order o, OrderBook book, long time) {
+        boolean fresh = o.fresh;
+        o.fresh = false;
+        if (!applyingRace && book.instrument.takerRaceNanos() > 0 && simulator.fillable(o, book) > 0) {
+            races.joinTaker(o, book, time);
+            return;
+        }
         if (o.tif == TimeInForce.FOK && simulator.fillable(o, book) < o.leaves) {
             terminate(o, CancelReason.FOK_UNFILLED, time);
             return;
@@ -422,7 +439,55 @@ public final class MatchingEngine {
         switch (o.tif) {
             case IOC -> terminate(o, CancelReason.IOC_UNFILLED, time);
             case FOK -> throw new IllegalStateException("FOK simulation disagreed with matching for order " + o.orderId);
-            default -> rest(o, book, time);
+            default -> {
+                if (fresh && !applyingRace && book.instrument.makerRaceNanos() > 0 && races.tryJoinMaker(o, book, time)) {
+                    return;
+                }
+                rest(o, book, time);
+            }
+        }
+    }
+
+    /** Applies an order drawn in a race lottery as an ordinary order. */
+    void applyRaceOrder(Order o, OrderBook book, long time) {
+        applyingRace = true;
+        try {
+            processBook(o, book, time);
+        } finally {
+            applyingRace = false;
+        }
+    }
+
+    /** Records that an order's queued request also waits for the book's taker races (queue-cancels). */
+    private void hold(Order o, OrderBook book, boolean raceHold) {
+        if (!raceHold || o.heldByRace) {
+            return;
+        }
+        o.heldByRace = true;
+        if (book.heldCount == book.heldIds.length) {
+            book.heldIds = java.util.Arrays.copyOf(book.heldIds, book.heldCount * 2);
+        }
+        book.heldIds[book.heldCount++] = o.orderId;
+    }
+
+    /** Best estimate of when a queued request will apply: TTL expiry or the end of the taker races. */
+    private static long queuedUntil(Order o, OrderBook book) {
+        return o.heldByRace ? Math.max(o.pendingRelease, RaceManager.latestTakerExpiry(book)) : o.pendingRelease;
+    }
+
+    /** Called when a book's last taker race resolves: applies held requests whose TTL has also passed. */
+    void releaseRaceHolds(OrderBook book, long time) {
+        int n = book.heldCount;
+        book.heldCount = 0;
+        for (int i = 0; i < n; i++) {
+            Order o = orders.get(book.heldIds[i]);
+            if (o == null || !o.heldByRace) {
+                continue;
+            }
+            o.heldByRace = false;
+            if (time >= o.pendingRelease && o.pendingType != null) {
+                applyPending(o, time);
+            } // otherwise its TTL timer applies it
         }
     }
 
@@ -634,21 +699,25 @@ public final class MatchingEngine {
             listener.onRequestRejected(time, o.orderId, RequestType.CANCEL, RequestRejectReason.CANCEL_ALREADY_PENDING);
             return;
         }
-        Instrument instrument = books[o.instrumentId].instrument;
+        OrderBook book = books[o.instrumentId];
+        Instrument instrument = book.instrument;
         long release = o.ttlStart + ttlFor(o, instrument);
-        if (time < release) {
-            if (instrument.rejectOnTtl()) {
-                listener.onRequestRejected(time, o.orderId, RequestType.CANCEL, RequestRejectReason.INSIDE_MIN_TTL);
-                return;
-            }
+        boolean raceHold = instrument.queueCancels() && RaceManager.takerRaceRunning(book);
+        if (time < release && instrument.rejectOnTtl()) {
+            // Inside TTL with reject-on-ttl: rejected even if a race would otherwise hold it (PLAN Q15 default).
+            listener.onRequestRejected(time, o.orderId, RequestType.CANCEL, RequestRejectReason.INSIDE_MIN_TTL);
+            return;
+        }
+        if (time < release || raceHold) {
             if (o.pendingType == RequestType.REPLACE) {
                 listener.onRequestRejected(time, o.orderId, RequestType.REPLACE, RequestRejectReason.SUPERSEDED);
-            } else {
+            } else if (time < release) {
                 timers.schedule(release, TIMER_TTL, o.orderId);
             }
             o.pendingType = RequestType.CANCEL;
             o.pendingRelease = release;
-            listener.onRequestQueued(time, o.orderId, RequestType.CANCEL, release);
+            hold(o, book, raceHold);
+            listener.onRequestQueued(time, o.orderId, RequestType.CANCEL, queuedUntil(o, book));
             return;
         }
         cancelResting(o, CancelReason.PARTICIPANT, time);
@@ -758,6 +827,11 @@ public final class MatchingEngine {
             fixing.onCutoff((int) id, deadline);
             return;
         }
+        if (kind == TIMER_RACE) {
+            races.onExpiry(id, deadline);
+            checkAllMid(deadline);
+            return;
+        }
         Order o = orders.get(id);
         if (o == null) {
             return; // order already finished
@@ -773,22 +847,27 @@ public final class MatchingEngine {
                 cancelResting(o, CancelReason.EXPIRED, deadline);
             }
         } else if (kind == TIMER_TTL) {
-            if (o.pendingType == null || o.pendingRelease != deadline) {
-                return;
+            if (o.pendingType == null || o.pendingRelease != deadline || o.heldByRace) {
+                return; // nothing queued, superseded, or still waiting for a taker race to finish
             }
-            RequestType type = o.pendingType;
-            o.pendingType = null;
-            if (type == RequestType.CANCEL) {
-                cancelResting(o, CancelReason.PARTICIPANT, deadline);
-            } else {
-                // Re-validate: the order may have filled while the replace was queued.
-                RequestRejectReason reason = validateReplace(o, o.pendingPrice, o.pendingQty, o.pendingMaxShow);
-                if (reason != null) {
-                    listener.onRequestRejected(deadline, o.orderId, RequestType.REPLACE, reason);
-                } else {
-                    applyReplace(o, o.pendingPrice, o.pendingQty, o.pendingMaxShow, o.pendingDiscretion, deadline);
-                }
-            }
+            applyPending(o, deadline);
+        }
+    }
+
+    /** Applies an order's queued cancel or replace. */
+    private void applyPending(Order o, long deadline) {
+        RequestType type = o.pendingType;
+        o.pendingType = null;
+        if (type == RequestType.CANCEL) {
+            cancelResting(o, CancelReason.PARTICIPANT, deadline);
+            return;
+        }
+        // Re-validate: the order may have filled while the replace was queued.
+        RequestRejectReason reason = validateReplace(o, o.pendingPrice, o.pendingQty, o.pendingMaxShow);
+        if (reason != null) {
+            listener.onRequestRejected(deadline, o.orderId, RequestType.REPLACE, reason);
+        } else {
+            applyReplace(o, o.pendingPrice, o.pendingQty, o.pendingMaxShow, o.pendingDiscretion, deadline);
         }
     }
 
@@ -812,6 +891,7 @@ public final class MatchingEngine {
             }
         }
         fixing.collect(filter, scratch);
+        races.collect(filter, scratch);
     }
 
     private void collectQueue(OrderQueue queue, Predicate<Order> filter) {

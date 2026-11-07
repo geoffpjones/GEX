@@ -103,6 +103,26 @@ final class SpikeListener implements EngineListener {
     }
 
     @Override
+    public void onRaceStarted(long time, long raceId, int instrumentId, boolean taker, Side side, long price,
+            long expiry, long seed) {
+        int p = claim();
+        out.putByte(p, (byte) 11);
+        out.putLong(p + 8, time);
+        out.putLong(p + 16, raceId);
+        out.putLong(p + 24, expiry);
+        out.putLong(p + 32, seed);
+    }
+
+    @Override
+    public void onOrderJoinedRace(long time, long orderId, long raceId) {
+        int p = claim();
+        out.putByte(p, (byte) 12);
+        out.putLong(p + 8, time);
+        out.putLong(p + 16, orderId);
+        out.putLong(p + 24, raceId);
+    }
+
+    @Override
     public void onOrderRepriced(long time, long orderId, long price) {
         int p = claim();
         out.putByte(p, (byte) 8);

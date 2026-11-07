@@ -25,6 +25,11 @@ class RandomAllTypesFlowTest {
         return TestInstruments.example(priority).qtyIncrement(500).priceIncrement(1).build();
     }
 
+    static Instrument withRaces(MatchPriority priority) {
+        return TestInstruments.example(priority).qtyIncrement(500).priceIncrement(1)
+                .takerRaceNanos(3 * MS).makerRaceNanos(2 * MS).queueCancels(true).build();
+    }
+
     record Run(Scenario scenario, Map<Long, Long> qtys) {}
 
     static Run run(Instrument instrument, long seed) {
@@ -79,9 +84,19 @@ class RandomAllTypesFlowTest {
     @ParameterizedTest
     @EnumSource(MatchPriority.class)
     void invariantsHold(MatchPriority priority) {
-        Instrument instrument = instrument(priority);
+        check(instrument(priority));
+    }
+
+    @ParameterizedTest
+    @EnumSource(MatchPriority.class)
+    void invariantsHoldWithRaces(MatchPriority priority) {
+        check(withRaces(priority));
+    }
+
+    private void check(Instrument instrument) {
         int trades = 0;
         int reprices = 0;
+        int races = 0;
         for (int seed = 0; seed < SEEDS; seed++) {
             Run run = run(instrument, seed);
             List<Event> events = run.scenario().events();
@@ -108,6 +123,7 @@ class RandomAllTypesFlowTest {
                     case Event.Cancelled c -> done.merge(c.orderId(), c.qty(), Long::sum);
                     case Event.Accepted a -> accepted.put(a.orderId(), 0L);
                     case Event.Repriced p -> reprices++;
+                    case Event.RaceStarted r -> races++;
                     default -> { }
                 }
             }
@@ -119,5 +135,8 @@ class RandomAllTypesFlowTest {
             assertEquals(events, run(instrument, seed).scenario().events(), "replay must be identical, seed " + seed);
         }
         assertTrue(trades > 1000 && reprices > 100, "flow exercised: trades=" + trades + " reprices=" + reprices);
+        if (instrument.takerRaceNanos() > 0) {
+            assertTrue(races > 1000, "races exercised: " + races);
+        }
     }
 }

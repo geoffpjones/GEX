@@ -57,26 +57,37 @@ public final class Scenario {
     private final Map<Long, OrderSpec> sent = new HashMap<>();
     private long now;
 
-    private Scenario(Instrument instrument, RefData refData) {
+    private Scenario(Instrument instrument, RefData refData, long seed) {
         this.instrument = instrument;
-        this.engine = new MatchingEngine(refData, EngineConfig.defaults(), new CreditEngine(PARTIES, refData),
-                recorder);
+        EngineConfig d = EngineConfig.defaults();
+        EngineConfig config = new EngineConfig(d.initialOrders(), d.maxLiveOrders(), d.initialLevels(),
+                d.initialLevelsPerSide(), d.initialTimers(), seed);
+        this.engine = new MatchingEngine(refData, config, new CreditEngine(PARTIES, refData), recorder);
         engine.onUsdRate(instrument.baseCurrency(), CreditEngine.RATE_SCALE, 0);
         engine.onValueDates(instrument.id(), SPOT_DATE, FAR_DATE, 0);
     }
 
     private static Scenario create(Instrument instrument) {
+        return create(instrument, EngineConfig.defaults().randomSeed());
+    }
+
+    private static Scenario create(Instrument instrument, long seed) {
         RefData.Builder b = RefData.builder().add(instrument).addFixingEvent(new FixingEvent(FIXING_EVENT,
                 "TEST-FIX", LocalTime.of(16, 0), ZoneId.of("Europe/London"), LocalTime.of(15, 55)));
         for (int i = 1; i <= PARTIES; i++) {
             b.entitle(i, i);
         }
-        return new Scenario(instrument, b.build());
+        return new Scenario(instrument, b.build(), seed);
     }
 
     /** Every pair of different accounts can trade, without limit. */
     public static Scenario of(Instrument instrument) {
-        Scenario s = create(instrument);
+        return of(instrument, EngineConfig.defaults().randomSeed());
+    }
+
+    /** As {@link #of(Instrument)}, with a specific race-lottery seed. */
+    public static Scenario of(Instrument instrument, long seed) {
+        Scenario s = create(instrument, seed);
         for (int a = 1; a <= PARTIES; a++) {
             s.engine.onCreditLine(a, a, CreditType.UNLIMITED, 0, 0);
             for (int b = 1; b <= PARTIES; b++) {

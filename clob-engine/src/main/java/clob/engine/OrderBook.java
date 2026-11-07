@@ -23,6 +23,21 @@ public final class OrderBook {
     long lastMidBid = Long.MIN_VALUE;
     long lastMidAsk = Long.MIN_VALUE;
 
+    /** Running taker race per aggressor side (indexed by {@code Side.ordinal()}). */
+    final RaceManager.Race[] takerRaces = new RaceManager.Race[2];
+    final java.util.ArrayList<RaceManager.Race> makerRaces = new java.util.ArrayList<>();
+    /** Orders whose queued request waits for the taker races to finish. */
+    long[] heldIds = new long[16];
+    int heldCount;
+
+    public boolean takerRaceRunning(Side side) {
+        return takerRaces[side.ordinal()] != null;
+    }
+
+    public int makerRaceCount() {
+        return makerRaces.size();
+    }
+
     OrderBook(Instrument instrument, int initialLevels) {
         this.instrument = instrument;
         this.bids = new BookSide(Side.BUY, initialLevels);

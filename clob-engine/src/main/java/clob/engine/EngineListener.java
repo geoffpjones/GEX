@@ -29,6 +29,16 @@ public interface EngineListener {
     /** A cancel or replace held until {@code releaseTime} (min TTL). */
     void onRequestQueued(long time, long orderId, RequestType type, long releaseTime);
 
+    /**
+     * A fairness race started. {@code price} is the level for a maker race (0 for a taker race).
+     * {@code seed} drives the lottery and is published for audit.
+     */
+    void onRaceStarted(long time, long raceId, int instrumentId, boolean taker, Side side, long price, long expiry,
+            long seed);
+
+    /** An order joined a race instead of matching or resting; it is applied when the race resolves. */
+    void onOrderJoinedRace(long time, long orderId, long raceId);
+
     /** A peg order moved to a new price, or resumed after suspension. It has new time priority. */
     void onOrderRepriced(long time, long orderId, long price);
 

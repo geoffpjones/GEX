@@ -13,7 +13,7 @@ Source: `requirements.md`. This plan covers the architecture, the build phases, 
 
 ## Implementation status (2026-11-07)
 
-**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit), Phase 4 core (pegged, mid and fixing orders).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 153 tests, all green.
+**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit), Phase 4 core (pegged, mid and fixing orders), Phase 5 core (fairness races).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 179 tests, all green.
 
 | Module | Contents |
 |---|---|
@@ -71,6 +71,23 @@ Phase 4, as built (`PegManager`, `MidMatcher`, `FixingDesk` in `clob-engine`):
 - **Engine output:** new `onOrderRepriced`, `onOrderSuspended` and `onFixingMatched` events.
 - **Performance:** with no peg, mid or fixing orders in the flow, the engine is about 2–10% slower than at Phase 3 (back-to-back runs: about 2.3–2.4M vs 2.4–2.6M events/s). The likely cause is the larger `Order` object. To recover in Phase 9 by moving rarely used fields out of `Order`.
 
+Phase 5, as built (`RaceManager`, `SplitMix64` in `clob-engine`):
+- **Taker race.** One per book per aggressor side, over the half-open window [start, start + interval).
+  - An order that would execute now joins it, or starts one. "Would execute" uses the FOK dry run, so credit and VISIBILITY apply.
+  - New orders, crossing amends and crossing peg reprices all join, including market, IOC and FOK orders. FOK is checked when applied.
+- **Maker race.** One per book per (side, price), started by a new order creating a level. Later new orders at that price join. Pending orders are held off the book until the window closes.
+- **Lottery.** One ticket per account, holding its orders in arrival order. Rounds shuffle the accounts that still have orders (Fisher–Yates over SplitMix64) and apply each one's next order as an ordinary order, until all tickets are empty.
+  - The seed comes from `EngineConfig.randomSeed` and the race id, and is published in `onRaceStarted` for audit.
+  - Fairness tests confirm about 50/50 between an early and a late account. Disabling the shuffle makes them fail.
+- **queue-cancels.** While a taker race runs, participant cancels and amends on the book are held. A request held by both min TTL and a race applies once both have cleared (confirmed Q15). Disconnect and admin cancels bypass the hold. Orders waiting in a race can't be amended (`PENDING_IN_RACE`).
+- **Engine output:** new `onRaceStarted` and `onOrderJoinedRace` events.
+- **Bench.** With 5ms taker and maker races on every book (a stress case: every new price level starts a maker race, and `queue-cancels` holds about half of all cancels):
+  - throughput is about 1.19M events/s, against 2.25M without races; p99 is 8.3 µs;
+  - each lottery's burst of orders runs inside whichever input triggers the expiry timer;
+  - allocation is 172 KB over 10M events, from pool growth.
+
+  Options for Phase 9: run race expiries as their own sequenced inputs; pre-size race, ticket and held-order pools.
+
 Defaults chosen for open questions (each is easy to change):
 - Q6i: `minQty` must be a multiple of `qtyIncrement`.
 - Q7c: market orders never rest, whatever their TIF.
@@ -94,6 +111,11 @@ Defaults chosen for open questions (each is easy to change):
 - Q5g: pending fixing matches wait for a rate; the next occurrence can't open until then.
 - Q21: mid TTL replaces min TTL for mid orders.
 - Q22: an engine reprice doesn't restart min TTL. A tick with an unchanged price keeps priority.
+- Q7b: cancels and amends are held book-wide (either side's taker race), including a taker's own race orders. Disconnect and admin cancels bypass the hold.
+- Q8: later new orders at a maker race's price join it, even if the level reappears meanwhile. Pending maker-race orders are off the book: not visible, not matchable.
+- Q15: with `reject-on-ttl`, a cancel inside TTL is rejected even while a race is running.
+- Q20: race admission means "would execute now", by the FOK dry run. Mid and fixing orders aren't subject to races.
+- Q37: only newly submitted orders start or join maker races. Amends and peg reprices rest normally. Orders waiting in a race can't be amended.
 - Q27–Q30: see below.
 
 **Phase 0 throughput spike: done** (`clob-bench`, results in `clob-bench/SPIKE-RESULTS.md`). On an Intel N100 development VM, one engine thread with a credit stub and output encoding runs at about 2.1M events/s flat out:
@@ -104,7 +126,7 @@ Defaults chosen for open questions (each is easy to change):
 
 **Decision:** stay on one shard for Phase 3, keep the engine shard-ready, and re-run the spike on production-class hardware before Phase 3 finishes. Sharding is triggered if load exceeds 50%, or p99 exceeds the latency target, at the agreed aggregate peak (Q11).
 
-Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: JMH benchmarks, Phase 5 onwards, and book-delta output for market data.
+Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: JMH benchmarks, Phase 6 onwards, and book-delta output for market data.
 
 ---
 
@@ -471,3 +493,4 @@ Status key: ✅ answered · 🟡 partly answered, follow-ups listed · ❓ open.
 34. ❓ **Mid reference.** Mid orders use the same reference as pegs: the visible top of book *excluding peg orders*. That stops pegs moving the mid. Should the mid include visible peg orders instead?
 35. ❓ **When pegs suspend.** Pegs are checked only on peg ticks. So if one side of the book empties between ticks, resting pegs keep their last price for up to one throttle interval (20ms) before suspending. Is that acceptable, or must they suspend immediately?
 36. ❓ **Mid priority.** Among mid orders that cross, priority is pure time. Should a more aggressive discretion win over an older but less aggressive order?
+37. ❓ **Maker races and amends.** Only newly submitted orders start or join a maker race. Should an amend, or a peg reprice, that creates a new price level start one too? And can orders waiting in a race be amended (today they can only be cancelled)?

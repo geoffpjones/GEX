@@ -14,5 +14,7 @@ public enum RequestRejectReason {
     INVALID_SHOW,
     QTY_NOT_ABOVE_FILLED,
     LEAVES_BELOW_MIN_QTY,
-    NOT_REPLACEABLE
+    NOT_REPLACEABLE,
+    /** The order is waiting in a race lottery; it can be amended once the race resolves. */
+    PENDING_IN_RACE
 }

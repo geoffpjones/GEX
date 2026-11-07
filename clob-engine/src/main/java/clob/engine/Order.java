@@ -51,8 +51,12 @@ final class Order {
     boolean inPegList;
     /** FIXING: the fixing event. */
     int fixingEventId;
-    /** MID and FIXING: the queue holding the order (instead of a price level). */
+    /** MID, FIXING and race tickets: the queue holding the order (instead of a price level). */
     OrderQueue queue;
+    /** Newly submitted and not yet processed (only new orders may start or join a maker race). */
+    boolean fresh;
+    /** A queued cancel/replace also waiting for the book's taker races to finish (queue-cancels). */
+    boolean heldByRace;
 
     Order prev;
     Order next;
@@ -92,6 +96,8 @@ final class Order {
         inPegList = false;
         fixingEventId = 0;
         queue = null;
+        fresh = false;
+        heldByRace = false;
         prev = null;
         next = null;
         level = null;

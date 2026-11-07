@@ -82,9 +82,21 @@ With the credit stub replaced by `CreditEngine`, configured per directed pair as
 | Paced 1M/s | p50 361 · p99 8,471 ns |
 | Allocation | 0 bytes per event, no GCs |
 
+## Phase 5 update: fairness races
+
+`--takerRaceMicros 5000 --makerRaceMicros 5000`, with queue-cancels on, applied to all 200 books. This is a stress case: every new price level starts a maker race.
+
+| Run | Result |
+|---|---|
+| No races, untimed | 2.25M ev/s |
+| Races, timed | 1.19M ev/s · p50 453 · p99 8,343 · p99.9 20,463 ns |
+| Passive add (starts most maker races) | mean 796 ns (was about 410) |
+| Allocation | 172 KB over 10M events (pool growth), no GCs |
+
+The tail comes from lottery bursts: when a race expires, its orders are all applied inside whichever input fires the timer. Options for Phase 9: sequence race expiries as their own inputs; pre-size race, ticket and held-order pools.
+
 ## Not yet included (each will add cost)
 
-- Fairness races.
 - Peg repricing storms (every peg re-evaluated every 20 ms tick).
 - Mid matching.
 - Book-delta output for market data.

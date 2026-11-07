@@ -59,6 +59,17 @@ public final class RecordingListener implements EngineListener {
     }
 
     @Override
+    public void onRaceStarted(long time, long raceId, int instrumentId, boolean taker, Side side, long price,
+            long expiry, long seed) {
+        events.add(new Event.RaceStarted(time, raceId, instrumentId, taker, side, price, expiry, seed));
+    }
+
+    @Override
+    public void onOrderJoinedRace(long time, long orderId, long raceId) {
+        events.add(new Event.JoinedRace(time, orderId, raceId));
+    }
+
+    @Override
     public void onOrderRepriced(long time, long orderId, long price) {
         events.add(new Event.Repriced(time, orderId, price));
     }

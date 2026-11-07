@@ -1,0 +1,9 @@
+[versions]
+agrona = "2.2.4"
+junit = "5.13.4"
+
+[libraries]
+agrona = { module = "org.agrona:agrona", version.ref = "agrona" }
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-launcher = { module = "org.junit.platform:junit-platform-launcher" }

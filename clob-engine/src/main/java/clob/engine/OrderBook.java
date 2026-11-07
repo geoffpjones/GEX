@@ -28,6 +28,16 @@ public final class OrderBook {
     final java.util.ArrayList<RaceManager.Race> makerRaces = new java.util.ArrayList<>();
     SessionState session = SessionState.OPEN;
 
+    /**
+     * Bumped by every input or timer that may change this book. Over-approximate (a rejected order bumps
+     * it too) but never misses a change, so a reader can skip a book whose version hasn't moved.
+     */
+    long version;
+
+    public long version() {
+        return version;
+    }
+
     public SessionState session() {
         return session;
     }
@@ -121,5 +131,25 @@ public final class OrderBook {
 
     public int pegCount() {
         return pegCount;
+    }
+
+    /** Receives displayed orders in priority order. */
+    @FunctionalInterface
+    public interface DisplayedOrderVisitor {
+        void visit(long price, long displayQty, int accountId);
+    }
+
+    /**
+     * Visits every order with displayed quantity on one side, best price first and in time priority
+     * within a price. Hidden quantity (hidden orders, iceberg reserves) is never shown. Allocation-free.
+     */
+    public void forEachDisplayed(Side side, DisplayedOrderVisitor visitor) {
+        BookSide s = side(side);
+        for (int i = 0; i < s.size(); i++) {
+            PriceLevel level = s.levelAt(i);
+            for (Order o = level.visHead; o != null; o = o.next) {
+                visitor.visit(level.price, o.displayQty, o.accountId);
+            }
+        }
     }
 }

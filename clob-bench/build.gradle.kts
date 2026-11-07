@@ -3,6 +3,7 @@ plugins { application }
 
 dependencies {
     implementation(project(":clob-engine"))
+    implementation(project(":clob-marketdata"))
     implementation(libs.agrona)
     implementation(libs.hdrhistogram)
 }

@@ -53,6 +53,8 @@ public final class InputCodec {
     public static final int FIXING_SCHEDULE = 12;
     public static final int FIXING_RATE = 13;
     public static final int SESSION_STATE = 14;
+    /** Market data cycle boundary; body: the boundary instant. The same cut for every consumer. */
+    public static final int MD_TICK = 15;
 
     private static final int CURRENCY_BYTES = 8;
 
@@ -272,6 +274,15 @@ public final class InputCodec {
         b.putInt(p, instrumentId, ORDER);
         b.putByte(p + 4, ord(state));
         return header(b, o, SESSION_STATE, 5);
+    }
+
+    public static int mdTick(MutableDirectBuffer b, int o, long boundary) {
+        b.putLong(o + HEADER, boundary, ORDER);
+        return header(b, o, MD_TICK, 8);
+    }
+
+    public static long mdTickBoundary(DirectBuffer b, int o) {
+        return b.getLong(o + HEADER, ORDER);
     }
 
     // ------------------------------------------------------------------ body field readers (used by the dispatcher)

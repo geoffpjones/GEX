@@ -31,6 +31,9 @@ final class FixSession {
     final ArrayList<byte[]> sentBodies = new ArrayList<>();
     final ArrayList<Long> sentMillis = new ArrayList<>();
 
+    /** MDReqID → market data subscription id. */
+    final Map<String, Long> mdRequests = new HashMap<>();
+
     /** ClOrdID (orders and their cancel/replace requests) → engine order id. */
     final Map<String, Long> clOrdIds = new HashMap<>();
 

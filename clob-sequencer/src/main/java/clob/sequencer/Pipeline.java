@@ -2,6 +2,8 @@ package clob.sequencer;
 
 import clob.engine.MatchingEngine;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.Agent;
@@ -35,11 +37,42 @@ public final class Pipeline implements AutoCloseable {
     private final AtomicLong processed = new AtomicLong();
     private final AgentRunner sequencerRunner;
     private final AgentRunner engineRunner;
+    private final List<Follower> followers = new ArrayList<>();
+    private final int ringBytes;
     private volatile Throwable failure;
+
+    /** Another consumer of the sequenced input stream (e.g. the market data replica) on its own thread. */
+    private final class Follower implements Agent {
+        final RingBuffer ring;
+        final InputHandler handler;
+        final AtomicLong processed = new AtomicLong();
+        AgentRunner runner;
+
+        Follower(InputHandler handler, long lastSequence) {
+            this.ring = new OneToOneRingBuffer(ring(ringBytes));
+            this.handler = handler;
+            this.processed.set(lastSequence);
+        }
+
+        @Override
+        public int doWork() {
+            int work = ring.read((type, buffer, index, length) -> {
+                handler.onInput(buffer, index, length);
+                processed.lazySet(InputCodec.sequence(buffer, index));
+            }, 256);
+            return work;
+        }
+
+        @Override
+        public String roleName() {
+            return "clob-follower";
+        }
+    }
 
     public Pipeline(MatchingEngine engine, Journal journal, Clock clock, EngineDispatcher.ErrorListener errors,
             long lastSequence, long lastTime, int ringBytes) {
         this.engine = engine;
+        this.ringBytes = ringBytes;
         this.inbound = new ManyToOneRingBuffer(ring(ringBytes));
         this.toEngine = new OneToOneRingBuffer(ring(ringBytes));
         this.dispatcher = new EngineDispatcher(engine, errors);
@@ -66,7 +99,22 @@ public final class Pipeline implements AutoCloseable {
         failure = t;
     }
 
+    /** Adds a consumer of every sequenced input, on its own thread. Call before {@link #start()}. */
+    public void addFollower(InputHandler handler) {
+        Follower f = new Follower(handler, sequenced.get());
+        f.runner = new AgentRunner(idle(), this::fail, null, f);
+        followers.add(f);
+    }
+
+    /** Emits market data cycle ticks on the wall-clock grid. Call before {@link #start()}. */
+    public void enableMarketDataTicks(long intervalNanos) {
+        sequencer.enableMarketDataTicks(intervalNanos);
+    }
+
     public void start() {
+        for (Follower f : followers) {
+            AgentRunner.startOnThread(f.runner);
+        }
         AgentRunner.startOnThread(engineRunner);
         AgentRunner.startOnThread(sequencerRunner);
     }
@@ -78,7 +126,7 @@ public final class Pipeline implements AutoCloseable {
 
     /** Waits until everything submitted so far has been sequenced and processed by the engine. */
     public void drain() {
-        while (inbound.size() > 0 || sequenced.get() != processed.get()) {
+        while (inbound.size() > 0 || sequenced.get() != processed.get() || followersBehind()) {
             if (failure != null) {
                 throw new IllegalStateException("Pipeline failed", failure);
             }
@@ -86,11 +134,23 @@ public final class Pipeline implements AutoCloseable {
         }
     }
 
+    private boolean followersBehind() {
+        for (Follower f : followers) {
+            if (f.processed.get() != sequenced.get()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     @Override
     public void close() {
         drain();
         sequencerRunner.close();
         engineRunner.close();
+        for (Follower f : followers) {
+            f.runner.close();
+        }
         if (failure != null) {
             throw new IllegalStateException("Pipeline failed", failure);
         }
@@ -108,6 +168,11 @@ public final class Pipeline implements AutoCloseable {
         while (!toEngine.write(MSG, buffer, offset, length)) {
             Thread.onSpinWait();
         }
+        for (int i = 0; i < followers.size(); i++) {
+            while (!followers.get(i).ring.write(MSG, buffer, offset, length)) {
+                Thread.onSpinWait();
+            }
+        }
     }
 
     private final class SequencerAgent implements Agent {
@@ -118,7 +183,7 @@ public final class Pipeline implements AutoCloseable {
             int work = inbound.read((type, buffer, index, length) ->
                     sequencer.onCommand(buffer, index, length), 256);
             long deadline = nextDeadline.get();
-            if (deadline != injectedFor && sequencer.poll(deadline)) {
+            if (sequencer.poll(deadline != injectedFor ? deadline : Long.MAX_VALUE)) {
                 injectedFor = deadline;
                 work++;
             }

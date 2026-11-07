@@ -19,6 +19,9 @@ public final class Sequencer {
     private final UnsafeBuffer scratch = new UnsafeBuffer(ByteBuffer.allocateDirect(InputCodec.MAX_LENGTH));
     private long sequence;
     private long lastTime;
+    private long mdIntervalNanos;
+    private long nextMdBoundary = Long.MAX_VALUE;
+    private long mdLateNanos;
 
     /** Continues after {@code lastSequence}/{@code lastTime} (0 for a new journal; from recovery otherwise). */
     public Sequencer(Journal journal, Clock clock, InputHandler downstream, long lastSequence, long lastTime) {
@@ -46,12 +49,38 @@ public final class Sequencer {
         downstream.onInput(buffer, offset, length);
     }
 
-    /** Injects a time input if the clock has reached {@code nextDeadline}. Returns true if it did. */
+    /**
+     * Emits an {@link InputCodec#MD_TICK} at every multiple of {@code intervalNanos} on the wall clock
+     * (00:00:00.000, .005, ...). If the sequencer falls behind, missed boundaries are skipped and only the
+     * latest is emitted; the lateness is recorded ({@link #maxMdLatenessNanos()}).
+     */
+    public void enableMarketDataTicks(long intervalNanos) {
+        mdIntervalNanos = intervalNanos;
+        long now = clock.nanos();
+        nextMdBoundary = (Math.floorDiv(now, intervalNanos) + 1) * intervalNanos;
+    }
+
+    public long maxMdLatenessNanos() {
+        return mdLateNanos;
+    }
+
+    /**
+     * Injects any due MD tick, and a time input if the clock has reached {@code nextDeadline}
+     * ({@code Long.MAX_VALUE} for none). Returns true if it injected a time input.
+     */
     public boolean poll(long nextDeadline) {
-        if (nextDeadline == Long.MAX_VALUE || clock.nanos() < nextDeadline) {
-            return false;
+        long now = clock.nanos();
+        boolean injected = false;
+        if (now >= nextMdBoundary) {
+            long boundary = Math.floorDiv(now, mdIntervalNanos) * mdIntervalNanos;
+            mdLateNanos = Math.max(mdLateNanos, now - boundary);
+            nextMdBoundary = boundary + mdIntervalNanos;
+            onCommand(scratch, 0, InputCodec.mdTick(scratch, 0, boundary));
         }
-        onCommand(scratch, 0, InputCodec.timeAdvance(scratch, 0));
-        return true;
+        if (nextDeadline != Long.MAX_VALUE && now >= nextDeadline) {
+            onCommand(scratch, 0, InputCodec.timeAdvance(scratch, 0));
+            injected = true;
+        }
+        return injected;
     }
 }

@@ -95,11 +95,32 @@ With the credit stub replaced by `CreditEngine`, configured per directed pair as
 
 The tail comes from lottery bursts: when a race expires, its orders are all applied inside whichever input fires the timer. Options for Phase 9: sequence race expiries as their own inputs; pre-size race, ticket and held-order pools.
 
+## Phase 8: screened market data cost (`MarketDataBench`)
+
+Setup: 200 books, 256 accounts, random bilateral credit (90% of directed pairs eligible), 60 resting orders per book, all subscriptions screened. Times are for one full cycle (every book, every subscription) on the market data thread.
+
+| Scenario | Cycle p50 | p99 | Notes |
+|---|---|---|---|
+| 64 subs/book, no displayed change (orders arrive but don't rest) | **1.7 ms** | 5.3 ms | content fingerprint skips the books |
+| Same, before fingerprinting (version only) | 21 ms | 28 ms | every touched book rebuilt |
+| 64 subs/book, **every book changes every cycle** | **44 ms** | 58 ms | 12,800 per-subscriber views per cycle |
+| Same, 100% eligible | 25 ms | 50 ms | accounts with orders in a book still differ (own orders hidden) |
+| 8 subs/book, every book changes | 9.9 ms | 42 ms | |
+| 20 books × 64 subs, every book changes | 5.0 ms | 18 ms | |
+
+**Finding:** about 2–3 µs per subscriber per changed book (eligibility key, build or share, compare, publish). Unchanged books are nearly free. A worst case of all 200 books changing within one 5 ms interval, with many subscribers each, does **not** fit on one market data thread on this hardware.
+
+Options, for Phase 9:
+- spread publishing across several threads, each reading the replica's frozen snapshot of a partition of instruments;
+- cache each subscriber's eligibility key while credit and the set of accounts present are unchanged;
+- incremental views (update only the changed price buckets).
+
+Q11 and Q19 (subscriber counts, realistic churn) decide how far this needs to go.
+
 ## Not yet included (each will add cost)
 
 - Peg repricing storms (every peg re-evaluated every 20 ms tick).
 - Mid matching.
-- Book-delta output for market data.
 - The sequencer → engine IPC handoff (Aeron IPC, typically tens of ns per message).
 
 ## Decision and next steps

@@ -26,6 +26,7 @@ final class GatewayHarness implements AutoCloseable {
     final RefData refData;
     final Journal journal;
     final Pipeline pipeline;
+    final clob.marketdata.MarketDataService marketData;
     final FixGateway gateway;
     private final AgentRunner runner;
 
@@ -41,6 +42,9 @@ final class GatewayHarness implements AutoCloseable {
                 new OutputEncoder(out));
         journal = Journal.open(dir, 1 << 20);
         pipeline = new Pipeline(engine, journal, Clock.system(), (s, t, ty, r) -> { }, 0, 0, 1 << 16);
+        marketData = new clob.marketdata.MarketDataService(refData, EngineConfig.defaults(), 8);
+        pipeline.addFollower(marketData);
+        pipeline.enableMarketDataTicks(5_000_000L);
         pipeline.start();
         UnsafeBuffer cmd = new UnsafeBuffer(ByteBuffer.allocateDirect(InputCodec.MAX_LENGTH));
         pipeline.submit(cmd, 0, InputCodec.usdRate(cmd, 0, "EUR", CreditEngine.RATE_SCALE));
@@ -55,7 +59,7 @@ final class GatewayHarness implements AutoCloseable {
         }
         pipeline.drain();
         gateway = new FixGateway(new FixGatewayConfig(COMP_ID, 0, 1, sessions, 5_000), refData, pipeline, out,
-                System::currentTimeMillis);
+                marketData, System::currentTimeMillis);
         runner = new AgentRunner(new BackoffIdleStrategy(100, 10, 1_000, 1_000_000), Throwable::printStackTrace, null,
                 gateway);
         AgentRunner.startOnThread(runner);

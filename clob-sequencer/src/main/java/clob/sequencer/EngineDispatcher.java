@@ -55,7 +55,7 @@ public final class EngineDispatcher implements InputHandler {
                 }
                 case InputCodec.MASS_CANCEL -> engine.onMassCancel(InputCodec.enumOf(InputCodec.SCOPES, i8(b, o, 0)),
                         i32(b, o, 1), i32(b, o, 5), InputCodec.enumOf(InputCodec.CANCEL_SOURCES, i8(b, o, 9)), time);
-                case InputCodec.TIME_ADVANCE -> engine.onTime(time);
+                case InputCodec.TIME_ADVANCE, InputCodec.MD_TICK -> engine.onTime(time);
                 case InputCodec.END_OF_DAY -> engine.onEndOfDay(time);
                 case InputCodec.CREDIT_LINE -> engine.onCreditLine(i32(b, o, 0), i32(b, o, 4),
                         InputCodec.enumOf(InputCodec.CREDIT_TYPES, i8(b, o, 8)), i64(b, o, 9), time);

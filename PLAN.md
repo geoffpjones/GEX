@@ -13,7 +13,7 @@ Source: `requirements.md`. This plan covers the architecture, the build phases, 
 
 ## Implementation status (2026-11-07)
 
-**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit), Phase 4 core (pegged, mid and fixing orders), Phase 5 core (fairness races), Phase 6 core (sequencing, journal, replay, session lifecycle), Phase 7 core (FIX order entry).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 215 tests, all green.
+**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit), Phase 4 core (pegged, mid and fixing orders), Phase 5 core (fairness races), Phase 6 core (sequencing, journal, replay, session lifecycle), Phase 7 core (FIX order entry), Phase 8 core (market data).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 228 tests, all green.
 
 | Module | Contents |
 |---|---|
@@ -22,6 +22,7 @@ Source: `requirements.md`. This plan covers the architecture, the build phases, 
 | `clob-credit` | `CreditEngine`: lines (pools) with a giver, type and USD limit; relationships (default plus per-instrument overrides); DSL per value date, NOP net; exact USD×10⁸ arithmetic; dry-run overlay for FOK |
 | `clob-engine` | `MatchingEngine` (pure, single-threaded, no clock), array-based `BookSide`, intrusive `PriceLevel` FIFOs (displayed and hidden queues), pooled orders and levels, timer heap, `FillSimulator` for FOK |
 | `clob-sequencer` | `InputCodec` (all 14 input types), `EngineDispatcher`, `OutputEncoder`, `Journal` (mmap segments, CRC32C, torn-tail recovery), `Sequencer` (stamp, journal, timer injection), `Pipeline` (gateway → sequencer → engine threads over Agrona rings) |
+| `clob-marketdata` | `MarketDataService` (replica engine on the input stream, bucketing, screening by equivalence class, change-only publishing, rotation), `SnapshotCodec`, `UdpPublisher` |
 | `clob-fix` | FIX 4.4 acceptor: zero-copy tag=value codec, session layer, order translation, execution reports (`docs/FIX-RoE.md`) |
 | `clob-testkit` | `Scenario` DSL (reads the requirements' `id\|side\|show\|price\|qty` tables), credit setup helpers, recorded events |
 | `clob-bench` | Throughput/latency harness (`SPIKE-RESULTS.md`) |
@@ -123,6 +124,23 @@ Phase 7, as built (`clob-fix`):
   - hashed passwords;
   - multi-gateway output fan-out.
 
+Phase 8, as built (`clob-marketdata`, plus market data ticks in the sequencer and market data over FIX):
+- **Replica, not deltas.** The market data service is a pipeline follower running a replica engine on the sequenced input stream. Determinism makes its books and credit identical to the matching engine's at every sequence number, so the engine needs no book-delta output.
+- **Coordinated cut.** The sequencer injects journalled `MD_TICK` inputs on the wall-clock grid (00:00:00.000, .005, …; missed boundaries are skipped and lateness recorded). Every subscriber's update in a cycle comes from the same point in the stream.
+- **Per cycle and instrument** (honouring each instrument's market data interval):
+  - collect displayed orders (hidden quantity never shown);
+  - bucket by the market data price increment, bids down and offers up, up to the instrument's levels;
+  - unscreened: one view; screened: orders from bilaterally eligible counterparties only (relationship-based, Q6e default), shared across subscribers with identical eligibility over the accounts present;
+  - publish only changed views, in a send order rotated by one per cycle per instrument;
+  - skip books whose version and displayed-content fingerprint are unchanged.
+- **Transports.**
+  - FIX: MarketDataRequest (V) subscribes or unsubscribes, with depth, tenor (20013), and screened (20015) plus Account. MarketDataSnapshotFullRefresh (W) carries the updates; MarketDataRequestReject (Y) the refusals.
+  - Unicast UDP: a binary snapshot with per-subscription sequence numbers.
+  - Market data cycle timing is recorded in a histogram (`cycleNanos`).
+- **Tests:** the requirements bucketing example, offer rounding, depth, hidden quantity, screening, equivalence-class sharing, change-only publishing, rotation, interval, the coordinated cut against the engine, UDP delivery, ticks driving a live pipeline, and QuickFIX/J subscriptions.
+- **Measured (`SPIKE-RESULTS.md`).** With 200 books × 64 screened subscribers, an unchanged-content cycle takes 1.7 ms. When every book changes every cycle it takes 44 ms, over the 5 ms budget, at about 2–3 µs per subscriber per changed book. Worst-case scale needs multi-threaded publishing (Phase 9).
+- **Not built yet:** incremental (delta) updates, a multicast transport for unscreened data, a gap-recovery/snapshot channel, and screening by credit headroom (Q6e).
+
 Defaults chosen for open questions (each is easy to change):
 - Q6i: `minQty` must be a multiple of `qtyIncrement`.
 - Q7c: market orders never rest, whatever their TIF.
@@ -161,7 +179,7 @@ Defaults chosen for open questions (each is easy to change):
 
 **Decision:** stay on one shard for Phase 3, keep the engine shard-ready, and re-run the spike on production-class hardware before Phase 3 finishes. Sharding is triggered if load exceeds 50%, or p99 exceeds the latency target, at the agreed aggregate peak (Q11).
 
-Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: JMH benchmarks, Phase 8 onwards, and book-delta output for market data.
+Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: JMH benchmarks, Phase 9 onwards, and book-delta output for market data.
 
 ---
 
@@ -533,3 +551,4 @@ Status key: ✅ answered · 🟡 partly answered, follow-ups listed · ❓ open.
 39. ❓ **Snapshots.** Recovery replays the whole journal. Since GTC orders live across sessions, should we snapshot engine state (for example, at each end of day) and start new journals from it? Is a recovery-time target set?
 40. ❓ **Journal durability.** Appends are durable against a process crash but not a power loss until flushed. Options: flush every N ms (latency cost), or rely on replication (Aeron Cluster, Phase 10). Which?
 41. ❓ **FIX session persistence.** Sequence numbers and the resend store are held in memory, so clients must reset sequences after a gateway restart. Should they persist (for example, rebuilt from the journal and engine output) so sessions survive a restart without a reset? Do we need TLS and hashed credentials for v1?
+42. ❓ **Market data scale target.** How many screened subscribers per instrument, and how many books change per 5 ms interval, at peak? The worst case measured here (200 books all changing, 64 subscribers each) takes about 44 ms per cycle on one thread. That decides whether we need multi-threaded publishing, a larger interval for screened data, or both.

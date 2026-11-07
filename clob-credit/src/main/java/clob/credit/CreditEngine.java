@@ -61,6 +61,7 @@ public final class CreditEngine {
     private final Map<String, Integer> currencyIndex = new HashMap<>();
     private final long[] usdRateE8;
 
+    private long version;
     private boolean simulating;
     private CreditLine[] shadowed = new CreditLine[16];
     private int shadowedCount;
@@ -119,6 +120,12 @@ public final class CreditEngine {
         }
         line.type = type;
         line.limitE8 = type == CreditType.UNLIMITED ? 0 : limitUsd * RATE_SCALE;
+        version++;
+    }
+
+    /** Bumped when lines or relationships change (eligibility may have changed). Not bumped by trades. */
+    public long version() {
+        return version;
     }
 
     /**
@@ -136,6 +143,7 @@ public final class CreditEngine {
                     + ", not " + from);
         }
         int pair = from * n + to;
+        version++;
         if (instrumentId == ALL_INSTRUMENTS) {
             defaultLine[pair] = lineId;
         } else {

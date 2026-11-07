@@ -1,6 +1,7 @@
 // FIX 4.4 order-entry gateway (acceptor): session layer, order translation, execution reports.
 dependencies {
     api(project(":clob-sequencer"))
+    api(project(":clob-marketdata"))
     implementation(libs.agrona)
     testImplementation(libs.quickfixj.core)
     testImplementation(libs.quickfixj.fix44)

@@ -15,6 +15,9 @@ import clob.refdata.OrderType;
 import clob.refdata.PegReference;
 import clob.refdata.RefData;
 import clob.refdata.TimeInForce;
+import clob.marketdata.BookView;
+import clob.marketdata.MarketDataService;
+import clob.marketdata.SnapshotCodec;
 import clob.sequencer.InputCodec;
 import clob.sequencer.OutputEncoder;
 import clob.sequencer.OutputReader;
@@ -36,6 +39,8 @@ import java.util.function.LongSupplier;
 import org.agrona.collections.Long2ObjectHashMap;
 import org.agrona.concurrent.Agent;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.ringbuffer.OneToOneRingBuffer;
+import org.agrona.concurrent.ringbuffer.RingBufferDescriptor;
 
 /**
  * FIX 4.4 order-entry acceptor. Runs on its own thread (an Agrona {@link Agent}): accepts TCP
@@ -70,8 +75,27 @@ public final class FixGateway implements Agent, AutoCloseable {
     private long nextExecId;
     private long nextMassCancelId;
 
+    private final MarketDataService marketData;
+    private final OneToOneRingBuffer mdRing;
+    private final UnsafeBuffer mdScratch = new UnsafeBuffer(ByteBuffer.allocateDirect(1 << 16));
+    private final BookView mdView = SnapshotCodec.newView();
+    private final Long2ObjectHashMap<MdSubscription> mdSubscriptions = new Long2ObjectHashMap<>();
+    private long nextSubscriptionId;
+
+    private record MdSubscription(FixSession session, String mdReqId, Instrument instrument) {}
+
     public FixGateway(FixGatewayConfig config, RefData refData, Pipeline pipeline, OutputRing outputs,
             LongSupplier wallMillis) throws IOException {
+        this(config, refData, pipeline, outputs, null, wallMillis);
+    }
+
+    /** With market data: {@code marketData} must be a follower of {@code pipeline}. */
+    public FixGateway(FixGatewayConfig config, RefData refData, Pipeline pipeline, OutputRing outputs,
+            MarketDataService marketData, LongSupplier wallMillis) throws IOException {
+        this.marketData = marketData;
+        this.mdRing = new OneToOneRingBuffer(new UnsafeBuffer(ByteBuffer.allocateDirect((1 << 20)
+                + RingBufferDescriptor.TRAILER_LENGTH)));
+        this.nextSubscriptionId = ((long) config.gatewayId() << 40) + 1;
         this.config = config;
         this.refData = refData;
         this.pipeline = pipeline;
@@ -129,6 +153,7 @@ public final class FixGateway implements Agent, AutoCloseable {
             event.read(buffer, index);
             onEngineEvent();
         }, 256);
+        work += mdRing.read((type, buffer, index, length) -> onSnapshot(buffer, index), 256);
         long now = wallMillis.getAsLong();
         for (int i = sessions.size() - 1; i >= 0; i--) {
             FixSession s = sessions.get(i);
@@ -201,6 +226,10 @@ public final class FixGateway implements Agent, AutoCloseable {
             // closing anyway
         }
         sessions.remove(s);
+        for (Long id : s.mdRequests.values()) {
+            mdSubscriptions.remove(id.longValue());
+            marketData.unsubscribe(id);
+        }
         if (s.loggedOn && s.config.cancelOnDisconnect()) {
             int len = InputCodec.massCancel(cmd, 0, MassCancelScope.USER, s.config.userId(), s.config.userId(),
                     CancelSource.DISCONNECT);
@@ -414,6 +443,7 @@ public final class FixGateway implements Agent, AutoCloseable {
             case "F" -> onCancelRequest(s, seq);
             case "G" -> onReplaceRequest(s, seq);
             case "q" -> onMassCancel(s, seq);
+            case "V" -> onMarketDataRequest(s, seq);
             default -> send(s, begin("j", true).add(45, seq).add(372, msgType).add(380, 3)
                     .add(58, "Unsupported message type"));
         }
@@ -582,6 +612,75 @@ public final class FixGateway implements Agent, AutoCloseable {
             submit(InputCodec.massCancel(cmd, 0, byAccount ? MassCancelScope.ACCOUNT : MassCancelScope.USER, scopeId,
                     s.config.userId(), CancelSource.PARTICIPANT));
         }
+    }
+
+    private void onMarketDataRequest(FixSession s, long seq) {
+        if (!require(s, seq, "V", 262, 263)) {
+            return;
+        }
+        String reqId = parser.str(262);
+        char type = parser.asChar(263);
+        if (type == '2') {
+            Long id = s.mdRequests.remove(reqId);
+            if (id != null) {
+                mdSubscriptions.remove(id.longValue());
+                marketData.unsubscribe(id);
+            }
+            return;
+        }
+        if (marketData == null) {
+            send(s, begin("Y", true).add(262, reqId).add(281, '0').add(58, "No market data on this gateway"));
+            return;
+        }
+        Instrument instrument = parser.has(55) ? instrument() : null;
+        boolean screened = parser.is(FixTags.SCREENED, "Y");
+        int account = parser.has(1) ? (int) parser.asLong(1) : 0;
+        if (instrument == null) {
+            send(s, begin("Y", true).add(262, reqId).add(281, '0').add(58, "Unknown symbol/tenor"));
+            return;
+        }
+        if (screened && !refData.isEntitled(s.config.userId(), account)) {
+            send(s, begin("Y", true).add(262, reqId).add(281, '3').add(58, "Not entitled to account"));
+            return;
+        }
+        if (s.mdRequests.containsKey(reqId)) {
+            send(s, begin("Y", true).add(262, reqId).add(281, '1').add(58, "Duplicate MDReqID"));
+            return;
+        }
+        int depth = parser.has(264) ? (int) parser.asLong(264) : 0;
+        long id = nextSubscriptionId++;
+        s.mdRequests.put(reqId, id);
+        mdSubscriptions.put(id, new MdSubscription(s, reqId, instrument));
+        marketData.subscribe(id, account, instrument.id(), depth, screened, this::onMarketDataThread);
+    }
+
+    /** Market data thread: encode and hand over to the gateway thread. */
+    private void onMarketDataThread(long subscriptionId, long boundary, BookView view) {
+        synchronized (mdScratch) {
+            int length = SnapshotCodec.encode(mdScratch, 0, subscriptionId, 0, boundary, view);
+            while (!mdRing.write(1, mdScratch, 0, length)) {
+                Thread.onSpinWait();
+            }
+        }
+    }
+
+    /** Gateway thread: one snapshot → MarketDataSnapshotFullRefresh (W). */
+    private void onSnapshot(org.agrona.DirectBuffer buffer, int index) {
+        MdSubscription sub = mdSubscriptions.get(SnapshotCodec.subscriptionId(buffer, index));
+        if (sub == null || !sub.session().loggedOn) {
+            return;
+        }
+        SnapshotCodec.decode(buffer, index, mdView);
+        int decimals = sub.instrument().pricePrecision();
+        FixEncoder w = begin("W", true).add(262, sub.mdReqId()).add(55, sub.instrument().symbol())
+                .add(FixTags.TENOR, sub.instrument().tenor()).add(268, mdView.bidCount() + mdView.askCount());
+        for (int i = 0; i < mdView.bidCount(); i++) {
+            w.add(269, '0').addDecimal(270, mdView.bidPrice(i), decimals).add(271, mdView.bidQty(i));
+        }
+        for (int i = 0; i < mdView.askCount(); i++) {
+            w.add(269, '1').addDecimal(270, mdView.askPrice(i), decimals).add(271, mdView.askQty(i));
+        }
+        send(sub.session(), w);
     }
 
     private void submit(int length) {

@@ -117,6 +117,7 @@ public final class MatchingEngine {
         o.fixingEventId = c.fixingEventId;
         o.fresh = true;
         OrderBook book = books[o.instrumentId];
+        book.version++;
         orders.put(o.orderId, o);
         listener.onOrderAccepted(time, o.orderId);
         if (o.type == OrderType.PEGGED) {
@@ -140,6 +141,7 @@ public final class MatchingEngine {
             return;
         }
         OrderBook book = books[o.instrumentId];
+        book.version++;
         requestCancel(o, source, time);
         mid.check(book, time);
     }
@@ -157,6 +159,7 @@ public final class MatchingEngine {
         }
         long maxShow = normaliseShow(c.maxShow);
         OrderBook book = books[o.instrumentId];
+        book.version++;
         RequestRejectReason reason = validateReplace(o, c.price, c.qty, maxShow);
         if (reason == null && o.pendingType == RequestType.CANCEL) {
             reason = RequestRejectReason.CANCEL_ALREADY_PENDING;
@@ -271,6 +274,7 @@ public final class MatchingEngine {
                 continue;
             }
             book.session = state;
+            book.version++;
             listener.onSessionState(time, book.instrument.id(), state);
             if (state == SessionState.OPEN) {
                 races.resolveDeferred(book, time);
@@ -719,6 +723,7 @@ public final class MatchingEngine {
     private void checkAllMid(long time) {
         for (OrderBook book : books) {
             if (book != null) {
+                book.version++; // callers (mass cancel, end of day, race expiry) may have changed any book
                 mid.check(book, time);
             }
         }
@@ -853,12 +858,13 @@ public final class MatchingEngine {
     private void fire(byte kind, long id, long deadline) {
         if (kind == TIMER_PEG) {
             OrderBook book = books[(int) id];
+            book.version++;
             pegs.onTick(book, deadline);
             mid.check(book, deadline);
             return;
         }
         if (kind == TIMER_FIXING) {
-            fixing.onCutoff((int) id, deadline);
+            fixing.onCutoff((int) id, deadline); // fixing orders are never displayed
             return;
         }
         if (kind == TIMER_RACE) {
@@ -871,6 +877,7 @@ public final class MatchingEngine {
             return; // order already finished
         }
         OrderBook book = books[o.instrumentId];
+        book.version++;
         fireOrderTimer(kind, o, deadline);
         mid.check(book, deadline);
     }

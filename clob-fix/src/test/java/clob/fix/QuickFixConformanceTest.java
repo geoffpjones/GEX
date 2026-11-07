@@ -275,4 +275,41 @@ class QuickFixConformanceTest {
         assertEquals('4', after.getChar(150), "no liquidity left: the IOC is cancelled, not filled");
         assertNotNull(after.getString(58));
     }
+
+    @Test
+    void screenedMarketDataSubscription() throws Exception {
+        quickfix.fix44.MarketDataRequest v = new quickfix.fix44.MarketDataRequest(new quickfix.field.MDReqID("MD1"),
+                new quickfix.field.SubscriptionRequestType('1'), new quickfix.field.MarketDepth(0));
+        quickfix.fix44.MarketDataRequest.NoMDEntryTypes types = new quickfix.fix44.MarketDataRequest.NoMDEntryTypes();
+        types.set(new quickfix.field.MDEntryType('0'));
+        v.addGroup(types);
+        quickfix.fix44.MarketDataRequest.NoRelatedSym sym = new quickfix.fix44.MarketDataRequest.NoRelatedSym();
+        sym.set(new Symbol("EUR/USD"));
+        v.addGroup(sym);
+        v.setString(1, "1");
+        v.setString(20015, "Y");
+        c1.send(v);
+        Message first = c1.next("W");
+        assertEquals("MD1", first.getString(262));
+        assertEquals(0, first.getInt(268), "empty book");
+        c2.send(limit("MB1", 2, Side.BUY, 1.08000, 2000));
+        c2.next("8");
+        Message update = c1.next("W");
+        assertEquals(1, update.getInt(268));
+        quickfix.Group entry = update.getGroup(1, 268);
+        assertEquals('0', entry.getChar(269));
+        assertEquals(1.08, entry.getDouble(270), 1e-9);
+        assertEquals(2000, entry.getDouble(271), 0);
+    }
+
+    @Test
+    void marketDataForUnknownSymbolIsRejected() throws Exception {
+        quickfix.fix44.MarketDataRequest v = new quickfix.fix44.MarketDataRequest(new quickfix.field.MDReqID("MD2"),
+                new quickfix.field.SubscriptionRequestType('1'), new quickfix.field.MarketDepth(1));
+        quickfix.fix44.MarketDataRequest.NoRelatedSym sym = new quickfix.fix44.MarketDataRequest.NoRelatedSym();
+        sym.set(new Symbol("XXX/YYY"));
+        v.addGroup(sym);
+        c1.send(v);
+        assertEquals("MD2", c1.next("Y").getString(262));
+    }
 }

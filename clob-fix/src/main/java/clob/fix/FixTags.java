@@ -18,6 +18,8 @@ final class FixTags {
     static final int FIXING_MATCHED_QTY = 20001;
     /** Race the order joined. */
     static final int RACE_ID = 20003;
+    /** MarketDataRequest: Y = screened book for the request's Account (1); N (default) = unscreened. */
+    static final int SCREENED = 20015;
     /** Trade identifier on fills (T{tradeId}{A|P}); the same trade id appears on both sides. */
     static final int TRADE_ID = 20004;
 }

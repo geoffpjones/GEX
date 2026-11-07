@@ -264,7 +264,7 @@ public final class Scenario {
     public List<Fill> fills() {
         List<Fill> out = new ArrayList<>();
         for (Event.Trade t : events(Event.Trade.class)) {
-            out.add(new Fill(t.passiveOrderId(), t.price(), t.qty()));
+            out.add(new Fill(t.passiveOrderId(), java.math.BigDecimal.valueOf(t.price(), t.priceDecimals()), t.qty()));
         }
         return out;
     }

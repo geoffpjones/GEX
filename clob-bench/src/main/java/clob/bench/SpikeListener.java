@@ -58,7 +58,7 @@ final class SpikeListener implements EngineListener {
 
     @Override
     public void onTrade(long time, long tradeId, int instrumentId, long aggressorOrderId, long passiveOrderId,
-            Side aggressorSide, long price, long qty, long aggressorLeaves, long passiveLeaves) {
+            Side aggressorSide, long price, int priceDecimals, long qty, long aggressorLeaves, long passiveLeaves) {
         int p = claim();
         out.putByte(p, (byte) 3);
         out.putInt(p + 4, instrumentId);

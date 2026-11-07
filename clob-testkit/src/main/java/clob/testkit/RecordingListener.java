@@ -33,9 +33,9 @@ public final class RecordingListener implements EngineListener {
 
     @Override
     public void onTrade(long time, long tradeId, int instrumentId, long aggressorOrderId, long passiveOrderId,
-            Side aggressorSide, long price, long qty, long aggressorLeaves, long passiveLeaves) {
+            Side aggressorSide, long price, int priceDecimals, long qty, long aggressorLeaves, long passiveLeaves) {
         events.add(new Event.Trade(time, tradeId, instrumentId, aggressorOrderId, passiveOrderId, aggressorSide,
-                price, qty, aggressorLeaves, passiveLeaves));
+                price, priceDecimals, qty, aggressorLeaves, passiveLeaves));
     }
 
     @Override

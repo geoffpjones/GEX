@@ -59,13 +59,31 @@ class MidOrderTest {
     }
 
     @Test
-    void offTickMidWithZeroDiscretionDoesNotMatch() {
+    void halfTickMidMatchesOneDecimalBeyondPrecision() {
+        // Confirmed 2026-11-07: mid may trade at one decimal place beyond the instrument's precision.
         Scenario t = Scenario.of(TestInstruments.visibility()).book("1|BUY|1000|92|1000", "2|SELL|1000|93|1000");
         t.buy(10).mid(0).qty(1000).send();
         t.sell(11).mid(0).qty(1000).send();
-        assertEquals(List.of(), t.fills());
-        t.buy(12).mid(1).qty(1000).send();
-        assertEquals(List.of(fill(11, 93, 1000)), t.fills());
+        assertEquals(List.of(fill(10, "92.5", 1000)), t.fills());
+        assertEquals(1, t.events(Event.Trade.class).get(0).priceDecimals());
+        assertEquals(925, t.events(Event.Trade.class).get(0).price());
+    }
+
+    @Test
+    void halfTickMidWithDiscretionClampsToTheLimit() {
+        Scenario t = Scenario.of(TestInstruments.visibility()).book("1|BUY|1000|92|1000", "2|SELL|1000|93|1000");
+        t.buy(10).mid(-1).qty(1000).send();  // limit 91.5
+        t.sell(11).mid(1).qty(1000).send();  // limit 91.5
+        assertEquals(List.of(fill(10, "91.5", 1000)), t.fills());
+    }
+
+    @Test
+    void midIgnoresTheOrderPriceIncrement() {
+        Scenario t = Scenario.of(TestInstruments.example(MatchPriority.VISIBILITY).priceIncrement(5).mdPriceIncrement(5)
+                .build()).book("1|BUY|1000|90|1000", "2|SELL|1000|95|1000");
+        t.buy(10).mid(0).qty(1000).send();
+        t.sell(11).mid(0).qty(1000).send();
+        assertEquals(List.of(fill(10, "92.5", 1000)), t.fills());
     }
 
     @Test
@@ -76,17 +94,18 @@ class MidOrderTest {
         assertEquals(List.of(), t.fills());
         t.advance(MS).buy(1).limit(92).qty(1000).send();
         t.sell(2).limit(94).qty(1000).send();
-        assertEquals(List.of(new Event.Trade(MS, 1, 0, 11, 10, Side.SELL, 93, 1000, 0, 0)),
+        assertEquals(List.of(new Event.Trade(MS, 1, 0, 11, 10, Side.SELL, 930, 1, 1000, 0, 0)),
                 t.events(Event.Trade.class));
     }
 
     @Test
-    void referenceMoveReChecksRestingMidOrders() {
-        Scenario t = Scenario.of(TestInstruments.visibility()).book("1|BUY|1000|92|1000", "2|SELL|1000|93|1000");
-        t.buy(10).mid(0).qty(1000).send();
-        t.sell(11).mid(0).qty(1000).send();
-        t.cancel(2).sell(3).limit(94).qty(1000).send(); // mid 92.5 -> 93
-        assertEquals(List.of(fill(10, 93, 1000)), t.fills());
+    void restingMidOrdersTradeAtTheMidWhenTheMarketReturns() {
+        s.cancel(2); // no visible offer: mid orders cannot match
+        s.buy(10).mid(0).qty(1000).send();
+        s.sell(11).mid(0).qty(1000).send();
+        assertEquals(List.of(), s.fills());
+        s.sell(3).limit(95).qty(1000).send();
+        assertEquals(List.of(fill(10, "93.5", 1000)), s.fills());
     }
 
     @Test
@@ -133,11 +152,9 @@ class MidOrderTest {
     }
 
     @Test
-    void tradePriceIsNearestValidPriceToMid() {
-        // mid 93 off a 5-pip increment grid: limits 90 (buy +0 rounds down) ... use wide discretion.
-        assertEquals(95, MidMatcher.tradePrice(186, 100, 90, Side.BUY, 5));
-        assertEquals(90, MidMatcher.tradePrice(185, 100, 90, Side.BUY, 5), "tie: resting buy gets the lower price");
-        assertEquals(95, MidMatcher.tradePrice(185, 100, 90, Side.SELL, 5), "tie: resting sell gets the higher price");
-        assertEquals(94, MidMatcher.tradePrice(186, 94, 94, Side.BUY, 1));
+    void tradePriceIsMidClampedToLimits() {
+        assertEquals(925, MidMatcher.tradePrice10(925, 935, 925));
+        assertEquals(940, MidMatcher.tradePrice10(930, 940, 940));
+        assertEquals(930, MidMatcher.tradePrice10(930, 940, 920));
     }
 }

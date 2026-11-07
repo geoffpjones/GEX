@@ -19,7 +19,8 @@ import java.util.function.Predicate;
  *       without a price ({@code onFixingMatched}, Q5f default). Credit is reserved at match time:
  *       exposure is notional × the base currency's USD rate, so the fixing price isn't needed (Q5b).
  *   <li><b>At cut-off:</b> unmatched quantity is cancelled ({@link CancelReason#FIXING_CUTOFF}).
- *   <li><b>When the rate arrives:</b> every pending match is reported as a trade at the rate.
+ *   <li><b>When the rate arrives:</b> every pending match is reported as a trade at the rate (given
+ *       at the instrument's price precision).
  * </ol>
  *
  * A new occurrence cannot be scheduled while the previous one still awaits its rate (Q5g default:
@@ -204,7 +205,7 @@ final class FixingDesk {
         }
         for (int k = 0; k < s.pending; k++) {
             engine.listener.onTrade(time, s.matchIds[k], instrumentId, s.aggressorIds[k], s.passiveIds[k],
-                    s.aggressorSides[k], rate, s.qtys[k], -1, -1);
+                    s.aggressorSides[k], rate, refData.instrument(instrumentId).pricePrecision(), s.qtys[k], -1, -1);
             s.aggressorSides[k] = null;
         }
         s.pending = 0;

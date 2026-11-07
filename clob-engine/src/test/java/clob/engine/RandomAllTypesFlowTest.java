@@ -92,7 +92,11 @@ class RandomAllTypesFlowTest {
                     case Event.Trade t when t.aggressorLeaves() >= 0 -> {
                         trades++;
                         assertTrue(instrument.isValidExecutionSize(t.qty()), "seed " + seed + " " + t);
-                        assertEquals(0, Math.floorMod(t.price(), instrument.priceIncrement()), "seed " + seed + " " + t);
+                        if (t.priceDecimals() == instrument.pricePrecision()) {
+                            assertEquals(0, Math.floorMod(t.price(), instrument.priceIncrement()), "seed " + seed + " " + t);
+                        } else {
+                            assertEquals(instrument.pricePrecision() + 1, t.priceDecimals(), "only mid trades use +1dp");
+                        }
                         done.merge(t.aggressorOrderId(), t.qty(), Long::sum);
                         done.merge(t.passiveOrderId(), t.qty(), Long::sum);
                     }

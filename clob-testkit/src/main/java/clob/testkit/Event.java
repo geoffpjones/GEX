@@ -15,7 +15,8 @@ public sealed interface Event {
     record Rejected(long time, long orderId, RejectReason reason) implements Event {}
 
     record Trade(long time, long tradeId, int instrumentId, long aggressorOrderId, long passiveOrderId,
-            Side aggressorSide, long price, long qty, long aggressorLeaves, long passiveLeaves) implements Event {}
+            Side aggressorSide, long price, int priceDecimals, long qty, long aggressorLeaves, long passiveLeaves)
+            implements Event {}
 
     record Cancelled(long time, long orderId, CancelReason reason, long qty) implements Event {}
 

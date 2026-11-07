@@ -549,7 +549,7 @@ public final class MatchingEngine {
             level.hiddenQty -= qty;
         }
         listener.onTrade(time, ++lastTradeId, book.instrument.id(), agg.orderId, passive.orderId, agg.side,
-                level.price, qty, agg.leaves, passive.leaves);
+                level.price, book.instrument.pricePrecision(), qty, agg.leaves, passive.leaves);
 
         if (agg.leaves > 0 && agg.leaves < minQty) {
             agg.residualCancelQty = agg.leaves;

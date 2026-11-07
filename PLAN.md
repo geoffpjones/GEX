@@ -59,7 +59,8 @@ Phase 4, as built (`PegManager`, `MidMatcher`, `FixingDesk` in `clob-engine`):
   - A discretion amend takes effect at the next tick, so it can't be used to beat the throttle.
 - **Mid.**
   - Separate mid book per instrument, matching only mid orders.
-  - Limits are mid ± discretion, rounded defensively. Price is `clamp(mid, sellLimit, buyLimit)`, or the nearest valid price when the mid is between ticks.
+  - Mid trades may execute at **one decimal place beyond the instrument's precision** (confirmed 2026-11-07). The half-tick mid is exact, so nothing is rounded: limits are mid ± discretion, price is `clamp(mid, sellLimit, buyLimit)`. A 92/93 market matches two zero-discretion mid orders at 92.5. Mid trades ignore the order price increment.
+  - Trade events carry `priceDecimals`: the instrument precision for book and fixing trades, precision+1 for mid trades. FIX execution reports and market data must honour it.
   - All four requirements examples pass.
   - Resting mid orders are re-checked whenever the reference moves.
   - Mid TTL replaces min TTL. Credit and min-qty rules apply. FOK has its own dry run.
@@ -84,7 +85,7 @@ Defaults chosen for open questions (each is easy to change):
 - Q6g: lines are pools owned by one giver and shared by whichever relationships and instruments map to them.
 - Q6h: a limit cut below usage blocks trades that increase exposure; trades that reduce exposure are still allowed.
 - A missing USD rate or value date blocks DSL/NOP lines; UNLIMITED lines still work.
-- Q3b/Q4f: discretion is applied to the raw reference (the mid may be half a tick), then rounded defensively. A mid trade's price is the valid price nearest the raw mid within both limits; on a tie, the resting order gets the better price.
+- Q4f (pegs only): discretion is applied to the raw reference (the mid may be half a tick), then rounded defensively to the order price increment: bids down, offers up. Pegs rest in the book, so they stay on the order price grid.
 - Q4e: peg ticks fall on a fixed grid (t = k × throttle). The reference is frozen per tick, and pegs are processed in arrival order.
 - Q5b: fixing credit is reserved at match time. Exposure is notional × USD rate, so the fixing price isn't needed.
 - Q5c: a fixing order names a fixing event, must be DAY, GTC or GTT, and can't be amended.
@@ -363,7 +364,7 @@ Status key: ✅ answered · 🟡 partly answered, follow-ups listed · ❓ open.
 2. ✅ **MD bucketing.** Corrected to 1.0000×1000, 0.9995×2000, 0.9990×1000, which confirms bids round down. Offers round up (confirmed).
 3. 🟡 **Mid orders.** Answered: discretion is in pips, positive means more aggressive, and `clamp(mid, sellLimit, buyLimit)` fits all four examples.
    - ✅ 3a. **Mid TTL** is the minimum resting time for a mid order, like min TTL.
-   - 🟡 3b. **Mid price increment and rounding:** fractional-tick prices are not allowed. Use order-entry increments and round midpoints defensively: bids down, offers up (confirmed). A 92/93 market with increment 1 and zero discretion therefore does not match. Still define whether rounding precedes discretion, how discretion-derived off-increment limits are rounded, and which valid execution price is used when rounded limits overlap around an off-tick raw midpoint.
+   - ✅ 3b. **Superseded (2026-11-07):** mid orders may match at one decimal place beyond the instrument's precision, so a 92/93 market with zero discretion matches at 92.5 and no rounding is needed. Previous note, kept for history: fractional-tick prices are not allowed. Use order-entry increments and round midpoints defensively: bids down, offers up (confirmed). A 92/93 market with increment 1 and zero discretion therefore does not match. Still define whether rounding precedes discretion, how discretion-derived off-increment limits are rounded, and which valid execution price is used when rounded limits overlap around an off-tick raw midpoint.
 4. 🟡 **Pegged orders.** Core semantics confirmed; off-increment price rounding remains Q4f. Answered: reference is MID or NEAR-TOUCH ± discretion, from the visible top of book excluding peg orders. The peg throttle is 20ms. New pegs are rejected and resting pegs suspended when there's no visible price.
    - ✅ 4a. Positive discretion means more aggressive. Pegs may cross the spread and trigger a match or taker race.
    - ✅ 4b. Repricing and resumption both lose time priority and rejoin at the back of the queue at the resulting price.
@@ -446,6 +447,7 @@ Status key: ✅ answered · 🟡 partly answered, follow-ups listed · ❓ open.
     - the maker-race window and allocation,
     - MD rotation per instrument,
     - unicast UDP for screened data,
+    - mid trades at one extra decimal place (2026-11-07),
     - SWAP and NDF price conventions,
     - min-qty residual cancellation.
 

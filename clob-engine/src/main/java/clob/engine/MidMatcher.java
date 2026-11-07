@@ -11,20 +11,24 @@ import clob.refdata.TimeInForce;
  *   <li>The mid comes from the visible top of book excluding peg orders, the same reference pegs use
  *       (PLAN Q34 default). With no visible bid or no visible offer, mid orders cannot match; they
  *       rest rather than being rejected.
+ *   <li>Mid trades may execute at <b>one decimal place beyond the instrument's precision</b> (confirmed,
+ *       2026-11-07), so the half-tick mid of any two prices is exact and nothing is rounded. Arithmetic
+ *       is in tenths of a tick: {@code mid10 = (bid + ask) × 5}.
  *   <li>Effective limits: buy = mid + discretion, sell = mid − discretion (pips; positive = more
- *       aggressive, confirmed). Discretion is applied to the raw mid (which may be half a tick), then
- *       rounded defensively to the price increment: bid limits down, offer limits up (Q3b default).
- *   <li>A buy and a sell cross when buyLimit ≥ sellLimit. Trade price = the valid price nearest the raw
- *       mid within [sellLimit, buyLimit], which is {@code clamp(mid, sellLimit, buyLimit)} when the mid
- *       is on the increment. On a tie, the resting (earlier) order gets the better price.
+ *       aggressive, confirmed). A buy and a sell cross when buyLimit ≥ sellLimit, and trade at
+ *       {@code clamp(mid, sellLimit, buyLimit)}, reported with {@code pricePrecision + 1} decimals.
+ *       So a 92/93 market matches two zero-discretion mid orders at 92.5.
  *   <li>Priority is time among crossing orders (Q36 default). A new mid order aggresses against resting
- *       ones. When the reference moves, resting mid orders are re-checked against each other: oldest
- *       buy first, each against sells oldest first; the later of the two is the aggressor.
+ *       ones. Whether two orders cross depends only on their discretions, not on where the mid is, so
+ *       resting orders are re-checked when the reference becomes available again (or moves): oldest buy
+ *       first, each against sells oldest first; the later of the two is the aggressor.
  *   <li>Credit and minimum-quantity rules are the same as the main book.
  * </ul>
  */
 final class MidMatcher {
     private static final long NO_PRICE = Long.MIN_VALUE;
+    /** Mid prices carry one extra decimal place. */
+    static final long SUB_TICKS = 10;
 
     private final MatchingEngine engine;
 
@@ -37,12 +41,12 @@ final class MidMatcher {
         long bid = book.referenceBid();
         long ask = book.referenceAsk();
         boolean live = bid != NO_PRICE && ask != NO_PRICE;
-        if (o.tif == TimeInForce.FOK && (!live || fillable(o, book, bid + ask) < o.leaves)) {
+        if (o.tif == TimeInForce.FOK && (!live || fillable(o, book, mid10(bid, ask)) < o.leaves)) {
             engine.terminate(o, CancelReason.FOK_UNFILLED, time);
             return;
         }
         if (live) {
-            aggress(o, book, bid + ask, time);
+            aggress(o, book, mid10(bid, ask), time);
         }
         if (o.residualCancelQty > 0) {
             long qty = o.residualCancelQty;
@@ -81,19 +85,18 @@ final class MidMatcher {
         if (bid == NO_PRICE || ask == NO_PRICE) {
             return;
         }
-        long twiceMid = bid + ask;
-        long inc = book.instrument.priceIncrement();
+        long mid10 = mid10(bid, ask);
         for (Order b = book.midBuys.head; b != null; ) {
             Order nextBuy = b.next;
             for (Order s = book.midSells.head; s != null && b.queue != null; ) {
                 Order nextSell = s.next;
-                long buyLimit = buyLimit(twiceMid, b.discretion, inc);
-                long sellLimit = sellLimit(twiceMid, s.discretion, inc);
+                long buyLimit = limit10(b, mid10);
+                long sellLimit = limit10(s, mid10);
                 if (buyLimit >= sellLimit) {
                     boolean buyIsLater = b.prioritySeq > s.prioritySeq;
                     Order agg = buyIsLater ? b : s;
                     Order passive = buyIsLater ? s : b;
-                    tryFill(agg, passive, buyLimit, sellLimit, twiceMid, book, time, true);
+                    tryFill(agg, passive, buyLimit, sellLimit, mid10, book, time, true);
                 }
                 s = nextSell;
             }
@@ -105,67 +108,37 @@ final class MidMatcher {
         return side == Side.BUY ? book.midBuys : book.midSells;
     }
 
-    private static long halfDown(long twice) {
-        return Math.floorDiv(twice, 2);
+    /** Mid in tenths of a tick. */
+    static long mid10(long bid, long ask) {
+        return (bid + ask) * (SUB_TICKS / 2);
     }
 
-    private static long halfUp(long twice) {
-        return -Math.floorDiv(-twice, 2);
+    /** Effective limit in tenths of a tick: buy = mid + discretion, sell = mid - discretion. */
+    static long limit10(Order o, long mid10) {
+        return o.side == Side.BUY ? mid10 + o.discretion * SUB_TICKS : mid10 - o.discretion * SUB_TICKS;
     }
 
-    private static long roundDown(long price, long inc) {
-        return Math.floorDiv(price, inc) * inc;
+    /** {@code clamp(mid, sellLimit, buyLimit)}, all in tenths of a tick. */
+    static long tradePrice10(long mid10, long buyLimit10, long sellLimit10) {
+        return Math.max(sellLimit10, Math.min(buyLimit10, mid10));
     }
 
-    private static long roundUp(long price, long inc) {
-        return -Math.floorDiv(-price, inc) * inc;
-    }
-
-    static long buyLimit(long twiceMid, long discretion, long inc) {
-        return roundDown(halfDown(twiceMid + 2 * discretion), inc);
-    }
-
-    static long sellLimit(long twiceMid, long discretion, long inc) {
-        return roundUp(halfUp(twiceMid - 2 * discretion), inc);
-    }
-
-    private static long limit(Order o, long twiceMid, long inc) {
-        return o.side == Side.BUY ? buyLimit(twiceMid, o.discretion, inc) : sellLimit(twiceMid, o.discretion, inc);
-    }
-
-    static long tradePrice(long twiceMid, long buyLimit, long sellLimit, Side passiveSide, long inc) {
-        long low = roundDown(halfDown(twiceMid), inc);
-        long high = roundUp(halfUp(twiceMid), inc);
-        long lowClamped = Math.max(sellLimit, Math.min(buyLimit, low));
-        long highClamped = Math.max(sellLimit, Math.min(buyLimit, high));
-        if (lowClamped == highClamped) {
-            return lowClamped;
-        }
-        long lowDistance = Math.abs(2 * lowClamped - twiceMid);
-        long highDistance = Math.abs(2 * highClamped - twiceMid);
-        if (lowDistance != highDistance) {
-            return lowDistance < highDistance ? lowClamped : highClamped;
-        }
-        return passiveSide == Side.BUY ? lowClamped : highClamped;
-    }
-
-    private void aggress(Order agg, OrderBook book, long twiceMid, long time) {
-        long inc = book.instrument.priceIncrement();
-        long aggLimit = limit(agg, twiceMid, inc);
+    private void aggress(Order agg, OrderBook book, long mid10, long time) {
+        long aggLimit = limit10(agg, mid10);
         OrderQueue opp = queue(book, agg.side.opposite());
         for (Order p = opp.head; p != null && agg.leaves > 0; ) {
             Order next = p.next;
-            long pLimit = limit(p, twiceMid, inc);
+            long pLimit = limit10(p, mid10);
             long buyLimit = agg.side == Side.BUY ? aggLimit : pLimit;
             long sellLimit = agg.side == Side.BUY ? pLimit : aggLimit;
             if (buyLimit >= sellLimit) {
-                tryFill(agg, p, buyLimit, sellLimit, twiceMid, book, time, false);
+                tryFill(agg, p, buyLimit, sellLimit, mid10, book, time, false);
             }
             p = next;
         }
     }
 
-    private void tryFill(Order agg, Order passive, long buyLimit, long sellLimit, long twiceMid, OrderBook book,
+    private void tryFill(Order agg, Order passive, long buyLimit, long sellLimit, long mid10, OrderBook book,
             long time, boolean aggressorResting) {
         Instrument instrument = book.instrument;
         long qty = Math.min(agg.leaves, passive.leaves);
@@ -176,14 +149,14 @@ final class MidMatcher {
                 return;
             }
         }
-        long price = tradePrice(twiceMid, buyLimit, sellLimit, passive.side, instrument.priceIncrement());
+        long price = tradePrice10(mid10, buyLimit, sellLimit);
         engine.credit.commit(agg.accountId, passive.accountId, instrument.id(), agg.side, qty);
         agg.leaves -= qty;
         agg.cumQty += qty;
         passive.leaves -= qty;
         passive.cumQty += qty;
         engine.listener.onTrade(time, engine.nextTradeId(), instrument.id(), agg.orderId, passive.orderId, agg.side,
-                price, qty, agg.leaves, passive.leaves);
+                price, instrument.pricePrecision() + 1, qty, agg.leaves, passive.leaves);
         afterFill(passive, instrument, time);
         if (aggressorResting) {
             afterFill(agg, instrument, time);
@@ -208,15 +181,14 @@ final class MidMatcher {
     }
 
     /** Dry run of {@link #aggress} for FOK, with credit simulated. */
-    private long fillable(Order agg, OrderBook book, long twiceMid) {
+    private long fillable(Order agg, OrderBook book, long mid10) {
         Instrument instrument = book.instrument;
-        long inc = instrument.priceIncrement();
-        long aggLimit = limit(agg, twiceMid, inc);
+        long aggLimit = limit10(agg, mid10);
         long remaining = agg.leaves;
         engine.credit.beginSimulation();
         try {
             for (Order p = queue(book, agg.side.opposite()).head; p != null && remaining > 0; p = p.next) {
-                long pLimit = limit(p, twiceMid, inc);
+                long pLimit = limit10(p, mid10);
                 long buyLimit = agg.side == Side.BUY ? aggLimit : pLimit;
                 long sellLimit = agg.side == Side.BUY ? pLimit : aggLimit;
                 if (buyLimit < sellLimit) {

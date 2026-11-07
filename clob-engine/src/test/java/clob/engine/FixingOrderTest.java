@@ -42,7 +42,7 @@ class FixingOrderTest {
 
         s.clear().advance(FIXING - CUTOFF);
         assertTrue(s.fixingRate(108_123));
-        assertEquals(List.of(new Event.Trade(FIXING, 1, 0, 11, 10, Side.SELL, 108_123, 2000, -1, -1)), s.events());
+        assertEquals(List.of(new Event.Trade(FIXING, 1, 0, 11, 10, Side.SELL, 108_123, 0, 2000, -1, -1)), s.events());
         assertFalse(s.fixingRate(108_123), "already priced");
     }
 

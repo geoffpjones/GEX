@@ -12,9 +12,13 @@ public interface EngineListener {
 
     void onOrderRejected(long time, long orderId, RejectReason reason);
 
-    /** Leaves are the true remaining quantities after the fill, before any residual cancel. */
+    /**
+     * A trade. {@code price} is fixed-point with {@code priceDecimals} decimal places: the instrument's
+     * price precision for book and fixing trades, one more for mid trades (which may execute at the
+     * half-tick mid). Leaves are the true remaining quantities after the fill, before any residual cancel.
+     */
     void onTrade(long time, long tradeId, int instrumentId, long aggressorOrderId, long passiveOrderId,
-            Side aggressorSide, long price, long qty, long aggressorLeaves, long passiveLeaves);
+            Side aggressorSide, long price, int priceDecimals, long qty, long aggressorLeaves, long passiveLeaves);
 
     void onOrderCancelled(long time, long orderId, CancelReason reason, long cancelledQty);
 

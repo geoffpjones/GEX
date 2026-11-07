@@ -55,8 +55,10 @@ final class Order {
     OrderQueue queue;
     /** Newly submitted and not yet processed (only new orders may start or join a maker race). */
     boolean fresh;
-    /** A queued cancel/replace also waiting for the book's taker races to finish (queue-cancels). */
+    /** A queued cancel/replace also waiting for a taker race to finish (queue-cancels). */
     boolean heldByRace;
+    /** The latest taker race running on the book when the request arrived; the hold ends when it resolves. */
+    long holdUntilRace;
 
     Order prev;
     Order next;
@@ -98,6 +100,7 @@ final class Order {
         queue = null;
         fresh = false;
         heldByRace = false;
+        holdUntilRace = 0;
         prev = null;
         next = null;
         level = null;

@@ -502,6 +502,7 @@ public final class MatchingEngine {
             return;
         }
         o.heldByRace = true;
+        o.holdUntilRace = RaceManager.latestTakerRaceId(book);
         if (book.heldCount == book.heldIds.length) {
             book.heldIds = java.util.Arrays.copyOf(book.heldIds, book.heldCount * 2);
         }
@@ -513,13 +514,22 @@ public final class MatchingEngine {
         return o.heldByRace ? Math.max(o.pendingRelease, RaceManager.latestTakerExpiry(book)) : o.pendingRelease;
     }
 
-    /** Called when a book's last taker race resolves: applies held requests whose TTL has also passed. */
-    void releaseRaceHolds(OrderBook book, long time) {
+    /**
+     * Called when taker race {@code raceId} resolves: releases requests held for it (or an earlier race),
+     * applying those whose min TTL has also passed. Requests held for a later race stay held, so
+     * back-to-back races cannot starve a cancel beyond the race that was running when it arrived.
+     */
+    void releaseRaceHolds(OrderBook book, long raceId, long time) {
         int n = book.heldCount;
-        book.heldCount = 0;
+        int kept = 0;
         for (int i = 0; i < n; i++) {
-            Order o = orders.get(book.heldIds[i]);
+            long id = book.heldIds[i];
+            Order o = orders.get(id);
             if (o == null || !o.heldByRace) {
+                continue;
+            }
+            if (o.holdUntilRace > raceId) {
+                book.heldIds[kept++] = id;
                 continue;
             }
             o.heldByRace = false;
@@ -527,6 +537,7 @@ public final class MatchingEngine {
                 applyPending(o, time);
             } // otherwise its TTL timer applies it
         }
+        book.heldCount = kept;
     }
 
     static boolean crosses(Order agg, long restingPrice) {

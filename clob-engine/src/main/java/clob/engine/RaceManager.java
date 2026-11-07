@@ -50,22 +50,42 @@ final class RaceManager {
 
     private final MatchingEngine engine;
     private final long baseSeed;
-    private final Long2ObjectHashMap<Race> active = new Long2ObjectHashMap<>();
+    private final Long2ObjectHashMap<Race> active = new Long2ObjectHashMap<>(2048, 0.5f);
     /** Active races in start order (deterministic iteration). */
-    private final ArrayList<Race> activeList = new ArrayList<>();
-    private final ArrayDeque<Race> racePool = new ArrayDeque<>();
-    private final ArrayDeque<Ticket> ticketPool = new ArrayDeque<>();
-    private final ArrayList<Ticket> round = new ArrayList<>();
+    private final ArrayList<Race> activeList = new ArrayList<>(1024);
+    private final ArrayDeque<Race> racePool = new ArrayDeque<>(1024);
+    private final ArrayDeque<Ticket> ticketPool = new ArrayDeque<>(8192);
+    private final ArrayList<Ticket> round = new ArrayList<>(1024);
     private final SplitMix64 rng = new SplitMix64();
     private long lastRaceId;
 
     RaceManager(MatchingEngine engine, long baseSeed) {
         this.engine = engine;
         this.baseSeed = baseSeed;
+        // Pre-size so race peaks don't allocate on the hot path (Phase 9).
+        for (int i = 0; i < 512; i++) {
+            Race r = new Race();
+            r.tickets.ensureCapacity(64);
+            racePool.add(r);
+        }
+        for (int i = 0; i < 4096; i++) {
+            ticketPool.add(new Ticket());
+        }
     }
 
     static boolean takerRaceRunning(OrderBook book) {
         return book.takerRaces[0] != null || book.takerRaces[1] != null;
+    }
+
+    /** Id of the most recently started taker race running on the book, or 0. */
+    static long latestTakerRaceId(OrderBook book) {
+        long id = 0;
+        for (Race r : book.takerRaces) {
+            if (r != null) {
+                id = Math.max(id, r.id);
+            }
+        }
+        return id;
     }
 
     /** Latest expiry of the book's running taker races, or {@code Long.MIN_VALUE}. */
@@ -208,8 +228,8 @@ final class RaceManager {
         r.tickets.clear();
         round.clear();
         racePool.add(r);
-        if (r.taker && !takerRaceRunning(book)) {
-            engine.releaseRaceHolds(book, deadline);
+        if (r.taker) {
+            engine.releaseRaceHolds(book, raceId, deadline);
         }
     }
 

@@ -54,8 +54,15 @@ public final class MarketDataService implements InputHandler {
     private final boolean[] dirty;
     private final long[] lastFingerprint;
     private long skipped;
-    /** account → index into presentAccounts this cycle, or -1. */
-    private final int[] accountIndex;
+    /**
+     * Per instrument: eligibility rows, rows[account] = bitset over accounts the account may trade with
+     * (bilateral, overrides included). Rebuilt lazily when the credit version changes, so a subscriber's
+     * screening key is a few word-wide ANDs instead of a credit lookup per account present.
+     */
+    private final long[][][] rows;
+    private final long[] rowsVersion;
+    private final int words;
+    private long[] presentMask;
     private final Histogram cycleNanos = new Histogram(60_000_000_000L, 3);
     private long builds;
     private long publishes;
@@ -65,8 +72,6 @@ public final class MarketDataService implements InputHandler {
     private final Orders asks = new Orders();
     private final BookView unscreened = new BookView(16);
     private final Map<Key, BookView> classViews = new HashMap<>();
-    private int[] presentAccounts = new int[64];
-    private int presentCount;
 
     static final class Subscription {
         final long id;
@@ -108,17 +113,30 @@ public final class MarketDataService implements InputHandler {
         }
     }
 
-    private record Key(long[] bits) {
+    /** Screening class key: pooled and reused every cycle (the class map is cleared first). */
+    private static final class Key {
+        final long[] bits;
+        int hash;
+
+        Key(int words) {
+            bits = new long[words];
+        }
+
         @Override
         public boolean equals(Object o) {
-            return o instanceof Key k && Arrays.equals(bits, k.bits);
+            return o instanceof Key k && hash == k.hash && Arrays.equals(bits, k.bits);
         }
 
         @Override
         public int hashCode() {
-            return Arrays.hashCode(bits);
+            return hash;
         }
     }
+
+    private final ArrayList<Key> keyPool = new ArrayList<>();
+    private final ArrayList<BookView> viewPool = new ArrayList<>();
+    private int keysUsed;
+    private int viewsUsed;
 
     public MarketDataService(RefData refData, EngineConfig config, int maxAccounts) {
         this.refData = refData;
@@ -134,8 +152,33 @@ public final class MarketDataService implements InputHandler {
         dirty = new boolean[refData.instrumentCapacity()];
         lastFingerprint = new long[refData.instrumentCapacity()];
         java.util.Arrays.fill(lastBookVersion, -1);
-        accountIndex = new int[maxAccounts + 1];
-        java.util.Arrays.fill(accountIndex, -1);
+        rows = new long[refData.instrumentCapacity()][][];
+        rowsVersion = new long[refData.instrumentCapacity()];
+        java.util.Arrays.fill(rowsVersion, -1);
+        words = (maxAccounts + 1 + 63) / 64;
+        presentMask = new long[words];
+        this.maxAccounts = maxAccounts;
+    }
+
+    private final int maxAccounts;
+
+    private long[][] eligibilityRows(int instrumentId) {
+        long version = replica.credit().version();
+        if (rows[instrumentId] == null || rowsVersion[instrumentId] != version) {
+            long[][] r = rows[instrumentId] == null ? new long[maxAccounts + 1][words] : rows[instrumentId];
+            CreditEngine credit = replica.credit();
+            for (int a = 1; a <= maxAccounts; a++) {
+                java.util.Arrays.fill(r[a], 0);
+                for (int b = 1; b <= maxAccounts; b++) {
+                    if (credit.eligible(a, b, instrumentId)) {
+                        r[a][b >>> 6] |= 1L << (b & 63);
+                    }
+                }
+            }
+            rows[instrumentId] = r;
+            rowsVersion[instrumentId] = version;
+        }
+        return rows[instrumentId];
     }
 
     /** Instrument cycles skipped because neither the book nor credit changed. */
@@ -259,17 +302,20 @@ public final class MarketDataService implements InputHandler {
     }
 
     private void publishInstrument(Instrument instrument, List<Subscription> subs, long boundary) {
-        collectAccounts();
-        boolean unscreenedBuilt = false;
+        java.util.Arrays.fill(presentMask, 0);
+        mark(bids);
+        mark(asks);
         classViews.clear();
+        keysUsed = 0;
+        viewsUsed = 0;
         int n = subs.size();
         int first = (int) (cycles[instrument.id()]++ % n);
-        try {
-            publishRotated(instrument, subs, boundary, n, first, unscreenedBuilt);
-        } finally {
-            for (int j = 0; j < presentCount; j++) {
-                accountIndex[presentAccounts[j]] = -1;
-            }
+        publishRotated(instrument, subs, boundary, n, first, false);
+    }
+
+    private void mark(Orders orders) {
+        for (int i = 0; i < orders.n; i++) {
+            presentMask[orders.account[i] >>> 6] |= 1L << (orders.account[i] & 63);
         }
     }
 
@@ -285,12 +331,14 @@ public final class MarketDataService implements InputHandler {
                 }
                 view = unscreened;
             } else {
-                Key key = eligibilityKey(s.account, instrument.id());
+                long[] row = eligibilityRows(instrument.id())[s.account];
+                Key key = eligibilityKey(row);
                 view = classViews.get(key);
                 if (view == null) {
-                    view = new BookView(instrument.mdLevels());
-                    build(view, instrument, key.bits());
+                    view = nextView(instrument.mdLevels());
+                    build(view, instrument, row);
                     classViews.put(key, view);
+                    keysUsed++; // keep this key; otherwise it is reused for the next subscriber
                 }
             }
             s.current.copyFrom(view, s.depth);
@@ -303,52 +351,34 @@ public final class MarketDataService implements InputHandler {
         }
     }
 
-    private void collectAccounts() {
-        presentCount = 0;
-        addAccounts(bids);
-        addAccounts(asks);
-        Arrays.sort(presentAccounts, 0, presentCount);
-        for (int j = 0; j < presentCount; j++) {
-            accountIndex[presentAccounts[j]] = j;
+    /** Screening class: the subscriber's eligibility restricted to the accounts present in the book. */
+    private Key eligibilityKey(long[] row) {
+        if (keysUsed == keyPool.size()) {
+            keyPool.add(new Key(words));
         }
-    }
-
-    private void addAccounts(Orders orders) {
-        for (int i = 0; i < orders.n; i++) {
-            int a = orders.account[i];
-            boolean seen = false;
-            for (int j = 0; j < presentCount; j++) {
-                if (presentAccounts[j] == a) {
-                    seen = true;
-                    break;
-                }
-            }
-            if (!seen) {
-                if (presentCount == presentAccounts.length) {
-                    presentAccounts = Arrays.copyOf(presentAccounts, presentCount * 2);
-                }
-                presentAccounts[presentCount++] = a;
-            }
+        Key k = keyPool.get(keysUsed);
+        int h = 1;
+        for (int w = 0; w < words; w++) {
+            long v = row[w] & presentMask[w];
+            k.bits[w] = v;
+            h = 31 * h + Long.hashCode(v);
         }
+        k.hash = h;
+        return k;
     }
 
-    private Key eligibilityKey(int account, int instrumentId) {
-        long[] bits = new long[(presentCount + 63) / 64 + 1];
-        CreditEngine credit = replica.credit();
-        for (int j = 0; j < presentCount; j++) {
-            if (credit.eligible(account, presentAccounts[j], instrumentId)) {
-                bits[j >>> 6] |= 1L << (j & 63);
-            }
+    private BookView nextView(int levels) {
+        if (viewsUsed == viewPool.size()) {
+            viewPool.add(new BookView(levels));
         }
-        return new Key(bits);
+        return viewPool.get(viewsUsed++);
     }
 
-    private boolean visible(long[] eligible, int account) {
-        int j = accountIndex[account];
-        return (eligible[j >>> 6] & (1L << (j & 63))) != 0;
+    private static boolean visible(long[] eligible, int account) {
+        return (eligible[account >>> 6] & (1L << (account & 63))) != 0;
     }
 
-    /** Builds a view; {@code eligible} null = unscreened, else a bitset over presentAccounts. */
+    /** Builds a view; {@code eligible} null = unscreened, else an eligibility row (bitset over accounts). */
     private void build(BookView view, Instrument instrument, long[] eligible) {
         builds++;
         view.clear(instrument.id());

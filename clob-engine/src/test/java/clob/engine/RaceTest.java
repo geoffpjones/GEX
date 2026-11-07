@@ -220,6 +220,18 @@ class RaceTest {
         }
 
         @Test
+        void backToBackRacesDoNotStarveAHeldCancel() {
+            Scenario t = Scenario.of(taker(true)).book("1|BUY|2000|92|2000", "2|SELL|1000|94|1000", "3|BUY|1000|90|1000");
+            t.sell(10).limit(92).qty(1000).ioc().send();          // race A (sell side), expires at 5ms
+            t.advance(MS).cancel(3);                              // held for race A
+            t.advance(3 * MS).buy(11).limit(94).qty(1000).ioc().send(); // race B (buy side) starts at 4ms
+            t.clear().advance(MS);                                // 5ms: A resolves while B still runs
+            assertTrue(t.events().contains(new Event.Cancelled(RACE, 3, CancelReason.PARTICIPANT, 1000)),
+                    "released when its own race resolved: " + t.events());
+            assertTrue(t.book().takerRaceRunning(Side.BUY));
+        }
+
+        @Test
         void cancelsAreImmediateWhenNoRaceIsRunning() {
             s.clear().cancel(1);
             assertEquals(List.of(new Event.Cancelled(0, 1, CancelReason.PARTICIPANT, 2000)), s.events());

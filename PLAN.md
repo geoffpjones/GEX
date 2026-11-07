@@ -13,7 +13,7 @@ Source: `requirements.md`. This plan covers the architecture, the build phases, 
 
 ## Implementation status (2026-11-07)
 
-**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit), Phase 4 core (pegged, mid and fixing orders), Phase 5 core (fairness races), Phase 6 core (sequencing, journal, replay, session lifecycle), Phase 7 core (FIX order entry), Phase 8 core (market data).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 228 tests, all green.
+**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit), Phase 4 core (pegged, mid and fixing orders), Phase 5 core (fairness races), Phase 6 core (sequencing, journal, replay, session lifecycle), Phase 7 core (FIX order entry), Phase 8 core (market data), Phase 9 (performance hardening, first pass).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 230 tests, all green.
 
 | Module | Contents |
 |---|---|
@@ -141,6 +141,19 @@ Phase 8, as built (`clob-marketdata`, plus market data ticks in the sequencer an
 - **Measured (`SPIKE-RESULTS.md`).** With 200 books × 64 screened subscribers, an unchanged-content cycle takes 1.7 ms. When every book changes every cycle it takes 44 ms, over the 5 ms budget, at about 2–3 µs per subscriber per changed book. Worst-case scale needs multi-threaded publishing (Phase 9).
 - **Not built yet:** incremental (delta) updates, a multicast transport for unscreened data, a gap-recovery/snapshot channel, and screening by credit headroom (Q6e).
 
+Phase 9, as built:
+- **Zero-allocation CI guard** (`AllocationTest`): 0 bytes over 1M measured events of mixed flow after warm-up. It found that `queue-cancels` holds could starve under back-to-back races; holds now end when the race running at request time resolves (Q7b refined). It also found race pool growth; the pools are now pre-sized.
+- **JMH microbenchmarks** (`EngineBenchmarks`): add/cancel 197 ns, a 5-level sweep with adds 1.1 µs, a crossed-book walk about 15 ns per skipped order, a peg tick about 20 ns per peg.
+- **Market data:** per-instrument eligibility matrices plus pooled keys and views halve the worst case (44 → 23 ms).
+- **End-to-end FIX latency bench** (`FixLatencyBench`). This VM can't give meaningful wire-to-wire numbers (4 shared vCPUs, backoff idle strategies).
+- **`docs/TUNING.md`:** core isolation and pinning, busy-spin idle strategies, OS, JVM and NIC settings, and the measurement tools.
+- **Still to do:**
+  - configurable busy-spin idle strategies in the pipeline;
+  - multi-threaded market data publishing for worst-case churn;
+  - moving rarely used fields out of `Order` (the Phase 4 regression);
+  - running race expiries as their own sequenced inputs;
+  - re-running everything on production-class hardware.
+
 Defaults chosen for open questions (each is easy to change):
 - Q6i: `minQty` must be a multiple of `qtyIncrement`.
 - Q7c: market orders never rest, whatever their TIF.
@@ -179,7 +192,7 @@ Defaults chosen for open questions (each is easy to change):
 
 **Decision:** stay on one shard for Phase 3, keep the engine shard-ready, and re-run the spike on production-class hardware before Phase 3 finishes. Sharding is triggered if load exceeds 50%, or p99 exceeds the latency target, at the agreed aggregate peak (Q11).
 
-Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: JMH benchmarks, Phase 9 onwards, and book-delta output for market data.
+Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: Phase 10 (operations), and book-delta output for market data.
 
 ---
 

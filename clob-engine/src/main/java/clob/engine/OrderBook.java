@@ -25,7 +25,7 @@ public final class OrderBook {
 
     /** Running taker race per aggressor side (indexed by {@code Side.ordinal()}). */
     final RaceManager.Race[] takerRaces = new RaceManager.Race[2];
-    final java.util.ArrayList<RaceManager.Race> makerRaces = new java.util.ArrayList<>();
+    final java.util.ArrayList<RaceManager.Race> makerRaces = new java.util.ArrayList<>(256);
     SessionState session = SessionState.OPEN;
 
     /**
@@ -47,7 +47,7 @@ public final class OrderBook {
     }
 
     /** Orders whose queued request waits for the taker races to finish. */
-    long[] heldIds = new long[16];
+    long[] heldIds = new long[1024];
     int heldCount;
 
     public boolean takerRaceRunning(Side side) {

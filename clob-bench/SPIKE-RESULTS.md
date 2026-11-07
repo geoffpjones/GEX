@@ -117,6 +117,42 @@ Options, for Phase 9:
 
 Q11 and Q19 (subscriber counts, realistic churn) decide how far this needs to go.
 
+## Phase 9: hardening results
+
+**Zero allocation is enforced.** `AllocationTest` runs a mixed flow (every order type, credit limits, pegs, mid, races, cancels, amends) through the engine. After a 1M-event warm-up, two 500k-event windows must each allocate 0 bytes. They do. Getting there found two issues:
+- **Held cancels could starve.** Requests held by `queue-cancels` were released only when no taker race was running, so back-to-back races starved them and the held list grew. Holds now end when the race that was running at request time resolves (regression test added).
+- **Race pool growth.** Race and ticket pools grew at rare peaks. They are now pre-sized.
+
+**JMH** (`EngineBenchmarks`, one book with 20 levels a side, hot cache, average per operation):
+
+| Operation | ns/op |
+|---|---|
+| passive add + cancel | 197 ± 14 |
+| 5 adds + IOC sweeping 5 levels | 1,095 ± 514 |
+| walk past 30 ineligible offers to fill 1 (crossed book) | 642 ± 100 (about 15 ns per skipped order) |
+| 200 pegs re-pricing on a tick | 4,314 ± 489 (about 20 ns per peg) |
+
+**Market data** (after eligibility matrices and pooled keys and views, 200 books × 64 screened subscribers):
+
+| Scenario | Cycle p50 |
+|---|---|
+| every book changes, 90% eligible | 44 → **22.9 ms** |
+| 100% eligible | 25 → 13 ms |
+| 8 subs/book | **5.5 ms** |
+| no displayed change | 1.1 ms |
+
+The worst case still needs multi-threaded publishing.
+
+**End to end** (`FixLatencyBench`, FIX D → gateway → sequencer + journal → engine → ExecutionReport over loopback TCP, CO-corrected):
+
+| Rate | p50 | p99 | Notes |
+|---|---|---|---|
+| 2k/s | 255 µs | 6.8 ms | gateway on a backoff idle strategy |
+| 10k/s | 125 µs | 30 ms | |
+| 2k/s, gateway busy-spinning | 183 µs | 330 ms | oversubscribed: 4 vCPUs for 5+ busy threads |
+
+These numbers are dominated by the environment: backoff idle strategies parking up to 100 µs per hop, and client and server sharing 4 vCPUs. They are not representative of production. See `docs/TUNING.md`.
+
 ## Not yet included (each will add cost)
 
 - Peg repricing storms (every peg re-evaluated every 20 ms tick).

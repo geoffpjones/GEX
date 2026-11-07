@@ -13,7 +13,7 @@ Source: `requirements.md`. This plan covers the architecture, the build phases, 
 
 ## Implementation status (2026-11-07)
 
-**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit), Phase 4 core (pegged, mid and fixing orders), Phase 5 core (fairness races), Phase 6 core (sequencing, journal, replay, session lifecycle), Phase 7 core (FIX order entry), Phase 8 core (market data), Phase 9 (performance hardening, first pass).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 230 tests, all green.
+**Done: Phase 0 (skeleton and throughput spike), Phase 1 (SPOT reference data and validation), Phase 2 core, Phase 3 core (credit), Phase 4 core (pegged, mid and fixing orders), Phase 5 core (fairness races), Phase 6 core (sequencing, journal, replay, session lifecycle), Phase 7 core (FIX order entry), Phase 8 core (market data), Phase 9 (performance hardening, first pass), Phase 10 core (operations).** Build with `./gradlew test` (Java 21, Gradle 9.4 wrapper). 238 tests, all green.
 
 | Module | Contents |
 |---|---|
@@ -24,6 +24,7 @@ Source: `requirements.md`. This plan covers the architecture, the build phases, 
 | `clob-sequencer` | `InputCodec` (all 14 input types), `EngineDispatcher`, `OutputEncoder`, `Journal` (mmap segments, CRC32C, torn-tail recovery), `Sequencer` (stamp, journal, timer injection), `Pipeline` (gateway → sequencer → engine threads over Agrona rings) |
 | `clob-marketdata` | `MarketDataService` (replica engine on the input stream, bucketing, screening by equivalence class, change-only publishing, rotation), `SnapshotCodec`, `UdpPublisher` |
 | `clob-fix` | FIX 4.4 acceptor: zero-copy tag=value codec, session layer, order translation, execution reports (`docs/FIX-RoE.md`) |
+| `clob-app` | Node wiring (`clob primary|standby|audit`), refdata file loader, admin and metrics HTTP API, ops agent (drop copy, trade report, metrics), warm-standby replication and promotion, audit tool (`docs/RUNBOOK.md`) |
 | `clob-testkit` | `Scenario` DSL (reads the requirements' `id\|side\|show\|price\|qty` tables), credit setup helpers, recorded events |
 | `clob-bench` | Throughput/latency harness (`SPIKE-RESULTS.md`) |
 
@@ -154,6 +155,26 @@ Phase 9, as built:
   - running race expiries as their own sequenced inputs;
   - re-running everything on production-class hardware.
 
+Phase 10, as built (`clob-app`):
+- **Node.** A node is built from `node.properties` and a refdata text file (`config/`). Recovery replays the journal, with output suppressed during replay so the drop copy isn't duplicated. The node then runs the pipeline, market data, FIX gateway, ops thread and admin API.
+- **Engine output fan-out** goes to the gateway and the ops thread. The ops thread writes the drop copy (`dropcopy.log`), the trade report (`trades.csv`), and Prometheus metrics (`GET /metrics`).
+- **Admin HTTP API** (token-authenticated, localhost):
+  - session halt and reopen; the kill switch (halt all, then admin-cancel every order); end of day; admin cancel;
+  - credit lines and relationships; USD rates; value dates and roll;
+  - fixing schedule (DST-aware occurrence from refdata) and fixing rate.
+
+  Every action is a sequenced, journalled input.
+- **Warm standby HA.** The primary streams its sequenced input stream to a standby, catching it up from the journal when it connects or reconnects. The standby journals and applies everything (identical state) with output suppressed. `POST /admin/promote` turns it into a primary continuing the sequence. Tests fail the primary, promote the standby (including one that joined late), check the journals are byte-identical, and trade against pre-failover orders.
+- **Audit tool** (`clob audit`): every journalled input with the output it produced, by replay.
+- **`docs/RUNBOOK.md`:** start and stop, daily lifecycle, incidents and kill switch, failover, monitoring, audit.
+- **Not built yet:**
+  - Aeron Cluster (Raft), for automatic leader election and fencing (Q43);
+  - synchronous replication (Q40);
+  - persistent FIX sessions (Q41);
+  - TLS and auth hardening on the admin API;
+  - a FIX drop-copy session;
+  - multi-gateway fan-out.
+
 Defaults chosen for open questions (each is easy to change):
 - Q6i: `minQty` must be a multiple of `qtyIncrement`.
 - Q7c: market orders never rest, whatever their TIF.
@@ -192,7 +213,7 @@ Defaults chosen for open questions (each is easy to change):
 
 **Decision:** stay on one shard for Phase 3, keep the engine shard-ready, and re-run the spike on production-class hardware before Phase 3 finishes. Sharding is triggered if load exceeds 50%, or p99 exceeds the latency target, at the agreed aggregate peak (Q11).
 
-Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: Phase 10 (operations), and book-delta output for market data.
+Not built yet in Phase 3: holiday calendars and value-date calculation (dates are supplied as inputs for now); credit events in engine output (needed for the market-data credit replica and risk UI); an account limit of 4,096 (dense pair table). Not built yet elsewhere: see the per-phase lists above, and book-delta output for market data.
 
 ---
 
@@ -565,3 +586,5 @@ Status key: ✅ answered · 🟡 partly answered, follow-ups listed · ❓ open.
 40. ❓ **Journal durability.** Appends are durable against a process crash but not a power loss until flushed. Options: flush every N ms (latency cost), or rely on replication (Aeron Cluster, Phase 10). Which?
 41. ❓ **FIX session persistence.** Sequence numbers and the resend store are held in memory, so clients must reset sequences after a gateway restart. Should they persist (for example, rebuilt from the journal and engine output) so sessions survive a restart without a reset? Do we need TLS and hashed credentials for v1?
 42. ❓ **Market data scale target.** How many screened subscribers per instrument, and how many books change per 5 ms interval, at peak? The worst case measured here (200 books all changing, 64 subscribers each) takes about 44 ms per cycle on one thread. That decides whether we need multi-threaded publishing, a larger interval for screened data, or both.
+43. ❓ **Automatic failover.** Promotion is a manual (or external-arbiter) decision, with no fencing, so running two primaries would split history. Is manual failover acceptable for v1, or is Aeron Cluster (Raft: automatic election and fencing, synchronous replication) required? Raft costs one network round trip to a majority on every input.
+44. ❓ **Journalling market data ticks.** MD ticks are journalled so every consumer cuts at the same point. At 5 ms that is about 200 records/s, roughly 0.7 GB/day, even when idle. Options: journal ticks only while there are subscribers; derive cuts from a sequence-number grid instead; or accept it and rotate journals daily (with snapshots, Q39).

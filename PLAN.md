@@ -5,7 +5,7 @@ Source: `requirements.md`. This plan covers the architecture, the build phases, 
 **Revision 5 (2026-11-07).** Consistency pass:
 - Fixed stale references: the VISIBILITY rule is now "exhaustion", not "reachability"; NDF settlement currency is deferred to Q10a; Q7c moved into the Phase 2 gate; the race risk now cites the open questions rather than answered ones.
 - Added Q20–Q26.
-- **Note:** the answers marked "confirmed" in Revision 4 are recorded only in this plan. `requirements.md` (last changed 20:34) does not yet contain them (Q26).
+- **Note (updated 2026-11-08):** the answers marked "confirmed" in Revision 4 have now been folded into `requirements.md` (Q26).
 
 **Revision 4 (2026-11-07).** Review update: adds explicit decision gates for matching, product economics and credit; specifies sequenced market-data boundaries and race admission rules; and corrects acceptance tests. Previous revision history: Revision 3 (2026-11-07). Revision 2 built in the answers to Q1–Q6, plus partial answers to Q7, Q8 and Q11. Revision 3 adds the latest requirements changes: the corrected visibility line (Q1a/Q1b), partial fills on credit breach (Q6a), pegs excluded from the peg reference (Q13), the `reject-on-ttl` flag (Q14), and fixing cut-off times (Q5). Each answered question in **§6** keeps a short record of the answer, plus any follow-ups the answer raised. The skeleton and throughput experiments can proceed. Production matching implementation is gated on **Q1c, Q6i, Q14a and Q15**; credit and product decisions have separate gates below. Examples validate outcomes but do not establish a complete algorithm.
 
@@ -544,7 +544,7 @@ Status key: ✅ answered · 🟡 partly answered, follow-ups listed · ❓ open.
     - How are rolled orders treated for the value-date change and any credit reservations?
     - What happens to DAY/GTT expiry that falls inside a race window, a TTL, or a maker-race lottery?
 25. ❓ **Parameter naming.** Are "market data throttle" (instrument data) and "market data interval" (MD section) the same parameter? Likewise "market data subscription levels" and "instrument market depth levels"?
-26. ❓ **Requirements sync.** These answers are recorded only in this plan, as "confirmed" in Revision 4, and not in `requirements.md`:
+26. ✅ **Requirements sync (done 2026-11-08).** `requirements.md` now contains the confirmed answers below. Unconfirmed defaults are listed separately in its §13 and open questions in §14. Answers folded in:
     - the VISIBILITY exhaustion rule,
     - offers round up,
     - the meaning of mid TTL, and mid rounding,
@@ -560,9 +560,67 @@ Status key: ✅ answered · 🟡 partly answered, follow-ups listed · ❓ open.
     - SWAP and NDF price conventions,
     - min-qty residual cancellation.
 
-    Fold them back into `requirements.md` so it stays the source of truth.
-
     Note that Q3b and Q4f are the same question (whether rounding to a tick happens before or after discretion is applied), so one answer can cover both.
+
+**Resolved in Q&A (2026-11-08)**
+- Q1c: confirmed: the visible top level is screened per aggressor. Noted for further consideration: clients looking at the unscreened price may behave differently.
+- Q1c/Q16: confirmed: refreshed iceberg slices count as displayed liquidity.
+- Q27: confirmed: an aggressor takes more than a slice through a match cycle (tip, others in the queue, tip again). Hidden liquidity unlocks only after the whole top level is drained. A non-zero show below a valid execution size is rejected.
+- Q28: confirmed: under VISIBILITY a non-IOC/FOK order that can't reach the visible top rests, and a crossing hidden order trades with it at once at the hidden order's price. The "sell 1000 at 93 will not match" example applies to IOC/FOK.
+- Q7c: confirmed: market orders accept IOC and FOK only.
+- Q28 scope: confirmed: only displayed quantity on the resting order triggers the hidden trade.
+- Amend priority: confirmed: lost on a price change or quantity increase, kept on a quantity decrease.
+- Q30: confirmed: the gateway guarantees client order ids are unique for the whole session; the engine keeps its live-order check.
+- Q18: confirmed: timers fire before same-time inputs, and race windows are half-open.
+
+- Q6b: confirmed: a SWAP's legs net to zero for NOP.
+- Q6c: confirmed: a single signed USD figure per line, limit on the absolute value.
+- Q6d: confirmed: a reference rate ticking about every 10 seconds. New trades use the latest rate; recorded usage is not revalued.
+- Q6g/Q32: confirmed: a pool can be shared by giving accounts of the same legal entity. Each relationship still names a receiving account.
+- Q6h: confirmed: a limit cut below usage blocks exposure-increasing trades and allows reducing ones.
+- Q29: confirmed: an aggressor reaching its own account's or entity's resting order has its remainder cancelled, with an explicit cancel reason.
+- Q6i: confirmed: min quantity must be a multiple of the quantity increment.
+- Q31: confirmed: a credit change never produces a trade by itself.
+- Q33: confirmed: value dates come from an external service as sequenced inputs. (Rate source: Q6d.)
+- Missing USD rate or value date: confirmed: the instrument halts and resumes automatically when the data arrives.
+- Q3b/Q4f: confirmed: discretion on the raw reference, then round (pegs only; mid isn't rounded).
+- Q35: confirmed: pegs suspend at the next peg tick.
+- Q22: confirmed: an engine reprice doesn't restart min TTL, and an unchanged tick keeps priority.
+- Q23: confirmed: the no-visible-bid-or-offer rule applies to mid orders only.
+- Q34: confirmed: the mid excludes peg orders.
+- Mid increment: confirmed: mid trades ignore the order price increment.
+- Q36: confirmed: pure time priority among mid orders.
+- Q5d: confirmed: fixing orders are in scope for v1.
+- Q5e: confirmed: continuous matching before cut-off, in time priority.
+- Q5c: confirmed: the order names an event, must be DAY, GTC or GTT, and can be cancelled but not amended.
+- Q5b: confirmed: credit is reserved at match time.
+- Q5f: confirmed: a match is reported at once without a price, then as a trade when the rate arrives.
+- Q5g: confirmed: pending matches wait for a rate.
+- Q21: confirmed: mid TTL replaces min TTL for mid orders.
+- Mid reference: confirmed: the unscreened book.
+- Q20: confirmed: "would execute now"; mid and fixing orders aren't subject to races.
+- Q7b: confirmed: only requests on the side being taken are held, plus a taker's own waiting race orders.
+- Q8: confirmed: later new orders at a maker race's price join it; pending orders are off the book. Under VISIBILITY, a hidden order can trade with such an order only after the race resolves.
+- Queued cancels: confirmed: an order can still fill while its cancel is queued.
+- Q37: confirmed: a new order or an amend creating a new level starts a maker race; a peg reprice doesn't.
+- Q38: confirmed: a halt cancels orders waiting in races. A pre-open phase accepts orders, applied through the lottery at the open.
+- Q6e: confirmed: screening is headroom-aware.
+- Q38 pre-open: confirmed: one lottery per book at the open; cancels and amends allowed with no TTL.
+- Q24 (partly): confirmed: end of day is 17:00 New York, DST-aware; rolled GTC orders keep priority.
+- Q15: confirmed: reject-on-ttl rejects inside TTL even during a race.
+- Q14a: confirmed: participant mass cancels obey TTL per order.
+
+**Code changes required by these answers (not yet made):**
+- Q28: today the resting order and the hidden order stay locked.
+- Q7c: today a market order with a resting TIF is accepted and its remainder cancelled.
+- Q6g/Q32: reference data needs a legal-entity concept, and the credit model must allow a pool across several giving accounts.
+- Q29: new self-trade check in the matching walk and FOK dry run, a new cancel reason, and FIX mapping. Today such orders are skipped.
+- Q7b: hold only requests on the side being taken. Today requests are held book-wide for a race on either side.
+- Q37: amends that create a new level start a maker race. Today only new orders do.
+- Q38: a halt cancels race-waiting orders (today they resolve at reopen). Add a pre-open phase that accepts orders and applies them by lottery at the open (today rejected).
+- Q6e: headroom-aware screening. Needs credit usage in the market data replica, and will weaken view sharing, so the over-budget worst case (Q42) gets harder.
+- Q24: an end-of-day schedule at 17:00 New York. Today end of day needs an admin input.
+- Missing data: halt the instrument and auto-resume on arrival. Today DSL and NOP lines are blocked and unlimited lines still trade.
 
 **Raised during implementation**
 
@@ -572,7 +630,7 @@ Status key: ✅ answered · 🟡 partly answered, follow-ups listed · ❓ open.
 
     Is that right? The alternative is to let a fill take more than the displayed slice.
 28. ❓ **Locked or crossed books with hidden orders (VISIBILITY).** A sell at 93 can't match a hidden bid at 93 (by the confirmed rule), so if it isn't IOC it rests. The visible offer then sits at 93 against the hidden bid at 93, and the hidden order never trades as an aggressor. Is that intended, or should a resting hidden order match an incoming visible order at its price?
-29. ❓ **Self-trade prevention.** The spec doesn't mention it. Today an account can trade with itself. Should same-account (or same-user) matches be prevented, and how: cancel the resting order, cancel the incoming one, or cancel both?
+29. ❓ **Self-trade prevention.** The spec doesn't mention it. Today self-trades are blocked only because an account holds no credit line to itself; there is no dedicated rule. Should same-account (or same-user) matches be prevented, and how: cancel the resting order, cancel the incoming one, or cancel both?
 30. ❓ **Order id uniqueness.** The engine rejects ids that duplicate a *live* order. Should the gateway or sequencer guarantee ids are unique for the whole session (recommended), or should the engine also track ids of finished orders?
 31. ❓ **Credit changes and crossed books.** If a credit change (a new relationship, a raised limit or a value-date roll) makes crossed resting orders tradable, should they match straight away? If so, which order is the aggressor and at what price? Today they stay crossed until one of them is amended or a new order arrives.
 32. ❓ **Who owns a credit pool.** The engine assumes a line (pool) is credit extended by *one* account, shared across that account's counterparties and instruments. Is that how pools work? Should a pool ever span several giving accounts, for example accounts in the same legal entity?

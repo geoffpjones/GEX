@@ -20,6 +20,11 @@ final class FixTags {
     static final int RACE_ID = 20003;
     /** MarketDataRequest: Y = screened book for the request's Account (1); N (default) = unscreened. */
     static final int SCREENED = 20015;
+    /**
+     * MarketDataRequest: deliver this subscription by UDP to this port at the session's own IP address.
+     * The address is never client-supplied, so the feed cannot be pointed at a third party.
+     */
+    static final int UDP_PORT = 20016;
     /** Trade identifier on fills (T{tradeId}{A|P}); the same trade id appears on both sides. */
     static final int TRADE_ID = 20004;
 }

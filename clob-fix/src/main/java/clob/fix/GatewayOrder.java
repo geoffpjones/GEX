@@ -1,20 +1,17 @@
 package clob.fix;
 
-import clob.engine.RequestType;
 import clob.refdata.Instrument;
 
-/** The gateway's view of one order it owns: FIX identifiers and running execution totals. */
+/** The gateway's view of one order: FIX identifiers, owner and running execution totals. */
 final class GatewayOrder {
     final long orderId;
-    final FixSession session;
+    final LogicalSession session;
     final Instrument instrument;
     final int account;
     final char side;
     final char ordType;
     final char tif;
     String clOrdId;
-    String pendingClOrdId;
-    RequestType pendingType;
     long qty;
     long price;
     long leaves;
@@ -23,7 +20,7 @@ final class GatewayOrder {
     long pendingFixing;
     boolean terminal;
 
-    GatewayOrder(long orderId, FixSession session, String clOrdId, Instrument instrument, int account, char side,
+    GatewayOrder(long orderId, LogicalSession session, String clOrdId, Instrument instrument, int account, char side,
             char ordType, char tif, long qty, long price) {
         this.orderId = orderId;
         this.session = session;

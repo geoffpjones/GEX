@@ -58,7 +58,7 @@ A credit relationship will define the credit extended by account 1 to account 2 
 
 A credit relationship can be applied to 1 or more instruments. An account might for example extend unlimited credit to another entity for all instruments except USD/TRY, USD/ILS and USD/PLN which have 100mio DSL limits.
 
-SWAPs will consume credit at the value-date of both the near and far leg. For NOP, a SWAP's two legs net to zero, so a SWAP consumes DSL on both dates but no NOP.
+SWAPs will consume credit at the value-date of both the near and far leg. For NOP, a SWAP's two legs net to zero, so a SWAP consumes DSL on both dates but no NOP. Once the near leg settles the far leg remains as NOP exposure, which can put a line over its limit with no trade. The line then accepts only reducing trades, and operations is alerted.
 
 NOP is a single signed USD figure per line, and the limit applies to its absolute value.
 
@@ -135,6 +135,7 @@ Fixing order rates will be sourced external to the orderbook, and provided throu
 - Credit is reserved at match time, using notional x USD rate, so the fixing price isn't needed.
 - A match is reported at once without a price, then as a trade when the rate arrives.
 - If the rate is missing or late, matches stay pending until a rate is supplied, and the next occurrence of that fixing can't open until then.
+- A rate supplied before the fixing time is refused; the source resends it at fixing time.
 
 ## 5. Order matching
 
@@ -242,6 +243,8 @@ When the race window expires, run the lottery:
 - Randomly pick an account to win and apply the first order for the account to the orderbook. Remove the account from the lottery if no orders are left on its ticket.
 - Continue randomly picking from remaining accounts until all accounts in the lottery have had their first order applied.
 - If any accounts remain (had > 1 order on ticket), repeat the lottery.
+
+A DAY or GTT order that reaches its expiry while waiting in a race expires on time and leaves its ticket.
 
 An order enters a taker race only if it would execute now, including credit and VISIBILITY rules. An order crossing only orders it can't trade with, or hidden liquidity it can't unlock, doesn't start or join a race. Mid and fixing orders aren't subject to races.
 
@@ -357,6 +360,19 @@ These decisions were made during implementation so that work could continue. Non
 |---|---|---|
 | Session states | PRE_OPEN, OPEN, HALTED, CLOSED. Outside OPEN and PRE_OPEN, new orders and amends are rejected and cancels always work. Resting orders stay on the book. | Q38 |
 
+### Adopted with the next-stage build (2026-11-08), not separately confirmed
+
+These were the plan's recommended defaults and are built in. Each can still change.
+
+| Topic | Current behaviour | Ref |
+|---|---|---|
+| FIX persistence | Sequence numbers and resend store survive a restart, not a failover. Passwords are salted hashes; TLS is left to a proxy. | D2 |
+| Stale rate | A rate that has merely aged does not halt; only a never-received or invalid one does. | D3 |
+| Pre-open order types | Limit and iceberg only. | D4 |
+| Durability and failover | Manual failover; asynchronous replication; journal forced every 10 ms; snapshot at each end of day. | D7 |
+| Transports | FIX over TCP, and a project-specific binary format over unicast UDP. FAST and ITCH are not built. | D9 |
+| Reference data changes | A journal replays only under the reference data that wrote it; changes need a controlled reset. | R08 |
+
 ## 14. Open questions
 
 These need a decision and have no agreed answer:
@@ -365,12 +381,10 @@ These need a decision and have no agreed answer:
 - **Performance targets:** is 2M updates/sec in total (all books peaking together) the design point? Latency targets, account counts and subscriber counts. (Q11)
 - **Market data delivery:** subscriber mix, how many books change per interval at peak, what "receive" means, slow-consumer and overload policy. (Q19, Q42)
 - **Transports:** which FIX, FAST and ITCH over TCP and UDP combinations are required, and whether screened UDP is mandatory for v1. (Q12)
-- **End of day:** how rolled orders are treated for the value-date change; expiry that falls inside a race window or TTL. (Q24)
+- **End of day:** how rolled orders are treated for the value-date change. (Q24)
 - **Parameter naming:** are "market data throttle" and "market data interval" the same parameter? Likewise "market data subscription levels" and "instrument market depth levels". (Q25)
 - **Wording to confirm:** "marker order" was read as market order, and "match with order mid/fixing orders" as other mid/fixing orders. Both are corrected above. (Q17)
 - **Operations:**
-  - snapshots and a recovery-time target (Q39);
-  - journal durability (Q40);
-  - FIX session persistence, TLS and hashed credentials (Q41);
+  - a recovery-time target (Q39);
   - automatic failover (Q43);
   - journalling market data ticks (Q44).

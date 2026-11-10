@@ -86,6 +86,13 @@ final class MdHarness {
         return this;
     }
 
+    /** A new line from {@code giver} and its relationship to {@code to}. */
+    MdHarness line(int lineId, int giver, CreditType type, long limitUsd, int to) {
+        feed(InputCodec.creditLine(buf, 0, lineId, giver, type, limitUsd));
+        feed(InputCodec.creditRelationship(buf, 0, giver, to, CreditEngine.ALL_INSTRUMENTS, lineId));
+        return this;
+    }
+
     MdHarness order(long id, int account, Side side, long price, long qty, long show) {
         c.reset();
         c.orderId = id;

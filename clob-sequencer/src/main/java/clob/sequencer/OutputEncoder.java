@@ -29,6 +29,8 @@ public final class OutputEncoder implements EngineListener {
     public static final int RACE_STARTED = 11;
     public static final int JOINED_RACE = 12;
     public static final int SESSION_STATE = 13;
+    public static final int CREDIT_LIMIT_BREACHED = 14;
+    public static final int END_OF_DAY = 15;
 
     private static final ByteOrder ORDER = ByteOrder.LITTLE_ENDIAN;
     private final UnsafeBuffer buf = new UnsafeBuffer(new byte[256]);
@@ -55,8 +57,8 @@ public final class OutputEncoder implements EngineListener {
         p += 4;
     }
 
-    private void i8(Enum<?> e) {
-        buf.putByte(p, InputCodec.ord(e));
+    private void i8(byte wireId) {
+        buf.putByte(p, wireId);
         p += 1;
     }
 
@@ -81,7 +83,7 @@ public final class OutputEncoder implements EngineListener {
     public void onOrderRejected(long time, long orderId, RejectReason reason) {
         begin(REJECTED, time);
         i64(orderId);
-        i8(reason);
+        i8(Wire.REJECT_REASONS.id(reason));
         end();
     }
 
@@ -93,7 +95,7 @@ public final class OutputEncoder implements EngineListener {
         i32(instrumentId);
         i64(aggressorOrderId);
         i64(passiveOrderId);
-        i8(aggressorSide);
+        i8(Wire.SIDES.id(aggressorSide));
         i64(price);
         i32(priceDecimals);
         i64(qty);
@@ -103,39 +105,43 @@ public final class OutputEncoder implements EngineListener {
     }
 
     @Override
-    public void onOrderCancelled(long time, long orderId, CancelReason reason, long cancelledQty) {
+    public void onOrderCancelled(long time, long orderId, CancelReason reason, long cancelledQty, long requestId) {
         begin(CANCELLED, time);
         i64(orderId);
-        i8(reason);
+        i8(Wire.CANCEL_REASONS.id(reason));
         i64(cancelledQty);
+        i64(requestId);
         end();
     }
 
     @Override
-    public void onOrderReplaced(long time, long orderId, long price, long qty, long leaves) {
+    public void onOrderReplaced(long time, long orderId, long price, long qty, long leaves, long requestId) {
         begin(REPLACED, time);
         i64(orderId);
         i64(price);
         i64(qty);
         i64(leaves);
+        i64(requestId);
         end();
     }
 
     @Override
-    public void onRequestRejected(long time, long orderId, RequestType type, RequestRejectReason reason) {
+    public void onRequestRejected(long time, long orderId, RequestType type, RequestRejectReason reason, long requestId) {
         begin(REQUEST_REJECTED, time);
         i64(orderId);
-        i8(type);
-        i8(reason);
+        i8(Wire.REQUEST_TYPES.id(type));
+        i8(Wire.REQUEST_REJECT_REASONS.id(reason));
+        i64(requestId);
         end();
     }
 
     @Override
-    public void onRequestQueued(long time, long orderId, RequestType type, long releaseTime) {
+    public void onRequestQueued(long time, long orderId, RequestType type, long releaseTime, long requestId) {
         begin(REQUEST_QUEUED, time);
         i64(orderId);
-        i8(type);
+        i8(Wire.REQUEST_TYPES.id(type));
         i64(releaseTime);
+        i64(requestId);
         end();
     }
 
@@ -146,7 +152,7 @@ public final class OutputEncoder implements EngineListener {
         i64(raceId);
         i32(instrumentId);
         bool(taker);
-        i8(side);
+        i8(Wire.SIDES.id(side));
         i64(price);
         i64(expiry);
         i64(seed);
@@ -165,7 +171,7 @@ public final class OutputEncoder implements EngineListener {
     public void onSessionState(long time, int instrumentId, SessionState state) {
         begin(SESSION_STATE, time);
         i32(instrumentId);
-        i8(state);
+        i8(Wire.SESSION_STATES.id(state));
         end();
     }
 
@@ -193,10 +199,25 @@ public final class OutputEncoder implements EngineListener {
         i32(fixingEventId);
         i64(aggressorOrderId);
         i64(passiveOrderId);
-        i8(aggressorSide);
+        i8(Wire.SIDES.id(aggressorSide));
         i64(qty);
         i64(aggressorLeaves);
         i64(passiveLeaves);
+        end();
+    }
+
+    @Override
+    public void onCreditLimitBreached(long time, int lineId, long usageE8, long limitE8) {
+        begin(CREDIT_LIMIT_BREACHED, time);
+        i32(lineId);
+        i64(usageE8);
+        i64(limitE8);
+        end();
+    }
+
+    @Override
+    public void onEndOfDay(long time) {
+        begin(END_OF_DAY, time);
         end();
     }
 }

@@ -20,14 +20,17 @@ public interface EngineListener {
     void onTrade(long time, long tradeId, int instrumentId, long aggressorOrderId, long passiveOrderId,
             Side aggressorSide, long price, int priceDecimals, long qty, long aggressorLeaves, long passiveLeaves);
 
-    void onOrderCancelled(long time, long orderId, CancelReason reason, long cancelledQty);
+    /** {@code requestId} is the participant cancel that caused this, or 0 if there was none. */
+    void onOrderCancelled(long time, long orderId, CancelReason reason, long cancelledQty, long requestId);
 
-    void onOrderReplaced(long time, long orderId, long price, long qty, long leaves);
+    /** {@code requestId} is the replace request that was applied. */
+    void onOrderReplaced(long time, long orderId, long price, long qty, long leaves, long requestId);
 
-    void onRequestRejected(long time, long orderId, RequestType type, RequestRejectReason reason);
+    /** A cancel or replace was refused, or could not be applied. {@code requestId} says which one. */
+    void onRequestRejected(long time, long orderId, RequestType type, RequestRejectReason reason, long requestId);
 
     /** A cancel or replace held until {@code releaseTime} (min TTL). */
-    void onRequestQueued(long time, long orderId, RequestType type, long releaseTime);
+    void onRequestQueued(long time, long orderId, RequestType type, long releaseTime, long requestId);
 
     /**
      * A fairness race started. {@code price} is the level for a maker race (0 for a taker race).
@@ -54,4 +57,10 @@ public interface EngineListener {
      */
     void onFixingMatched(long time, long matchId, int instrumentId, int fixingEventId, long aggressorOrderId,
             long passiveOrderId, Side aggressorSide, long qty, long aggressorLeaves, long passiveLeaves);
+
+    /** The end-of-day cut happened (after DAY orders are cancelled). */
+    default void onEndOfDay(long time) {}
+
+    /** A NOP line went over its limit with no trade: a SWAP's near leg settled and its far leg remains. */
+    default void onCreditLimitBreached(long time, int lineId, long usageE8, long limitE8) {}
 }

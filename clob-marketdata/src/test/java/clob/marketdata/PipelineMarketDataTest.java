@@ -42,6 +42,8 @@ class PipelineMarketDataTest {
             p.enableMarketDataTicks(5_000_000L);
             p.start();
             p.submit(b, 0, InputCodec.creditLine(b, 0, 1, 1, CreditType.UNLIMITED, 0));
+            p.submit(b, 0, InputCodec.usdRate(b, 0, setup.refData.instrument(0).baseCurrency(), CreditEngine.RATE_SCALE));
+            p.submit(b, 0, InputCodec.valueDates(b, 0, 0, 20_000, -1));
             NewOrderCommand c = new NewOrderCommand();
             c.orderId = 1; c.instrumentId = 0; c.accountId = 1; c.userId = 1; c.side = Side.BUY;
             c.type = OrderType.LIMIT; c.tif = TimeInForce.GTC; c.price = 10000; c.qty = 1000;

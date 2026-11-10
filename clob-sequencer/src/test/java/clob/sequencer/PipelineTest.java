@@ -65,6 +65,7 @@ class PipelineTest {
                 Pipeline p = new Pipeline(engine, journal, clock, (s, t, ty, r) -> { }, 0, 0, 1 << 16)) {
             p.start();
             p.submit(buf, 0, InputCodec.creditLine(buf, 0, 1, 1, CreditType.UNLIMITED, 0));
+            p.submit(buf, 0, InputCodec.valueDates(buf, 0, 1, 20_000, -1));
             NewOrderCommand c = new NewOrderCommand();
             c.orderId = 1; c.instrumentId = 1; c.accountId = 1; c.userId = 1; c.side = Side.BUY;
             c.type = OrderType.LIMIT; c.tif = TimeInForce.GTT; c.price = 95; c.qty = 1000;

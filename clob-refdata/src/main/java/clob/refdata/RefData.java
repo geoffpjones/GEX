@@ -14,6 +14,7 @@ public final class RefData {
     private final Map<String, Instrument> byKey;
     private final LongHashSet entitlements;
     private final FixingEvent[] fixingEvents;
+    private final Map<Integer, Integer> entities;
 
     private RefData(Builder b) {
         int maxId = -1;
@@ -29,6 +30,7 @@ public final class RefData {
         instruments = Collections.unmodifiableList(new ArrayList<>(b.instruments));
         entitlements = new LongHashSet();
         entitlements.addAll(b.entitlements);
+        entities = new HashMap<>(b.entities);
         int maxEvent = -1;
         for (FixingEvent e : b.fixingEvents) {
             maxEvent = Math.max(maxEvent, e.id());
@@ -69,6 +71,32 @@ public final class RefData {
         return entitlements.contains(entitlementKey(userId, accountId));
     }
 
+    /**
+     * The account's legal entity. An account not assigned to one is its own entity, under an id that
+     * cannot collide with a configured entity id.
+     */
+    public int entityOf(int accountId) {
+        Integer entity = entities.get(accountId);
+        return entity != null ? entity : -accountId;
+    }
+
+    /** Largest account id named by an entitlement or legal-entity assignment; 0 if none. */
+    public int maxReferencedAccount() {
+        int max = 0;
+        for (long key : entitlements) {
+            max = Math.max(max, (int) key);
+        }
+        for (int account : entities.keySet()) {
+            max = Math.max(max, account);
+        }
+        return max;
+    }
+
+    /** Account to legal-entity assignments, for canonical comparison of reference data. */
+    public Map<Integer, Integer> entityAssignments() {
+        return Collections.unmodifiableMap(entities);
+    }
+
     private static long entitlementKey(int userId, int accountId) {
         return ((long) userId << 32) | (accountId & 0xFFFF_FFFFL);
     }
@@ -84,6 +112,7 @@ public final class RefData {
         private final LongHashSet entitlements = new LongHashSet();
         private final List<FixingEvent> fixingEvents = new ArrayList<>();
         private final Map<Integer, FixingEvent> fixingIds = new HashMap<>();
+        private final Map<Integer, Integer> entities = new HashMap<>();
 
         public Builder addFixingEvent(FixingEvent event) {
             if (fixingIds.putIfAbsent(event.id(), event) != null) {
@@ -101,6 +130,17 @@ public final class RefData {
                 throw new IllegalArgumentException("Duplicate instrument " + instrument.key());
             }
             instruments.add(instrument);
+            return this;
+        }
+
+        /** Assigns an account to a legal entity ({@code entityId} must be positive). */
+        public Builder entity(int accountId, int entityId) {
+            if (accountId < 1 || entityId < 1) {
+                throw new IllegalArgumentException("account and entity ids must be positive");
+            }
+            if (entities.putIfAbsent(accountId, entityId) != null) {
+                throw new IllegalArgumentException("Account " + accountId + " already has a legal entity");
+            }
             return this;
         }
 

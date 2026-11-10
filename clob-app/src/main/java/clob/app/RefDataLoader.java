@@ -4,12 +4,15 @@ import clob.refdata.FixingEvent;
 import clob.refdata.Instrument;
 import clob.refdata.InstrumentType;
 import clob.refdata.MatchPriority;
+import clob.refdata.OrderType;
 import clob.refdata.RefData;
+import clob.refdata.TimeInForce;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.util.EnumSet;
 import java.util.List;
 
 /**
@@ -19,8 +22,10 @@ import java.util.List;
  * instrument &lt;id&gt; &lt;symbol&gt; &lt;tenor&gt; [key=value ...]
  *   keys: type, precision, priceIncrement, minQty, maxQty, qtyIncrement, minShow, mdPriceIncrement,
  *         mdLevels, mdIntervalMs, minTtlMicros, midTtlMicros, pegThrottleMs, takerRaceMicros,
- *         makerRaceMicros, queueCancels, rejectOnTtl, matchPriority
+ *         makerRaceMicros, queueCancels, rejectOnTtl, matchPriority,
+ *         orderTypes (comma-separated, e.g. LIMIT,ICEBERG), tifs (comma-separated, e.g. DAY,GTC,IOC)
  * entitle &lt;userId&gt; &lt;accountId&gt;
+ * entity &lt;accountId&gt; &lt;legalEntityId&gt;
  * fixing &lt;id&gt; &lt;name&gt; &lt;HH:mm&gt; &lt;zone&gt; &lt;cutoff HH:mm&gt;
  * </pre>
  */
@@ -45,6 +50,7 @@ public final class RefDataLoader {
                 switch (t[0]) {
                     case "instrument" -> b.add(instrument(t));
                     case "entitle" -> b.entitle(Integer.parseInt(t[1]), Integer.parseInt(t[2]));
+                    case "entity" -> b.entity(Integer.parseInt(t[1]), Integer.parseInt(t[2]));
                     case "fixing" -> b.addFixingEvent(new FixingEvent(Integer.parseInt(t[1]), t[2], LocalTime.parse(t[3]),
                             ZoneId.of(t[4]), LocalTime.parse(t[5])));
                     default -> throw new IllegalArgumentException("unknown entry '" + t[0] + "'");
@@ -71,18 +77,36 @@ public final class RefDataLoader {
                 case "minShow" -> b.minShow(Long.parseLong(v));
                 case "mdPriceIncrement" -> b.mdPriceIncrement(Long.parseLong(v));
                 case "mdLevels" -> b.mdLevels(Integer.parseInt(v));
-                case "mdIntervalMs" -> b.mdIntervalNanos(Long.parseLong(v) * 1_000_000L);
-                case "minTtlMicros" -> b.minTtlNanos(Long.parseLong(v) * 1_000L);
-                case "midTtlMicros" -> b.midTtlNanos(Long.parseLong(v) * 1_000L);
-                case "pegThrottleMs" -> b.pegThrottleNanos(Long.parseLong(v) * 1_000_000L);
-                case "takerRaceMicros" -> b.takerRaceNanos(Long.parseLong(v) * 1_000L);
-                case "makerRaceMicros" -> b.makerRaceNanos(Long.parseLong(v) * 1_000L);
+                case "mdIntervalMs" -> b.mdIntervalNanos(Math.multiplyExact(Long.parseLong(v), 1_000_000L));
+                case "minTtlMicros" -> b.minTtlNanos(Math.multiplyExact(Long.parseLong(v), 1_000L));
+                case "midTtlMicros" -> b.midTtlNanos(Math.multiplyExact(Long.parseLong(v), 1_000L));
+                case "pegThrottleMs" -> b.pegThrottleNanos(Math.multiplyExact(Long.parseLong(v), 1_000_000L));
+                case "takerRaceMicros" -> b.takerRaceNanos(Math.multiplyExact(Long.parseLong(v), 1_000L));
+                case "makerRaceMicros" -> b.makerRaceNanos(Math.multiplyExact(Long.parseLong(v), 1_000L));
+                case "orderTypes" -> b.supportedOrderTypes(parseSet(OrderType.class, v));
+                case "tifs" -> b.supportedTifs(parseSet(TimeInForce.class, v));
                 case "queueCancels" -> b.queueCancels(Boolean.parseBoolean(v));
                 case "rejectOnTtl" -> b.rejectOnTtl(Boolean.parseBoolean(v));
                 case "matchPriority" -> b.matchPriority(MatchPriority.valueOf(v));
                 default -> throw new IllegalArgumentException("unknown instrument key '" + kv[0] + "'");
             }
         }
-        return b.build();
+        Instrument instrument = b.build();
+        if (instrument.supportedOrderTypes().contains(OrderType.PEGGED) && instrument.pegThrottleNanos() == 0) {
+            throw new IllegalArgumentException("pegged orders are enabled but pegThrottleMs is 0");
+        }
+        if (instrument.supportedOrderTypes().equals(EnumSet.of(OrderType.MARKET))
+                && instrument.supportedTifs().stream().noneMatch(tif -> tif == TimeInForce.IOC || tif == TimeInForce.FOK)) {
+            throw new IllegalArgumentException("market orders need IOC or FOK");
+        }
+        return instrument;
+    }
+
+    private static <E extends Enum<E>> EnumSet<E> parseSet(Class<E> type, String list) {
+        EnumSet<E> set = EnumSet.noneOf(type);
+        for (String item : list.split(",")) {
+            set.add(Enum.valueOf(type, item.trim()));
+        }
+        return set;
     }
 }

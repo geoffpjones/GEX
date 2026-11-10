@@ -1,7 +1,8 @@
 # Example reference data (see clob-app RefDataLoader for the format).
 instrument 0 EUR/USD SPOT precision=5 priceIncrement=1 minQty=1000000 qtyIncrement=100000 maxQty=500000000 mdPriceIncrement=1 mdLevels=5 mdIntervalMs=5 minTtlMicros=5000 pegThrottleMs=20 takerRaceMicros=0 makerRaceMicros=0 matchPriority=VISIBILITY
 instrument 1 USD/MXN SPOT precision=5 priceIncrement=5 minQty=1000000 qtyIncrement=100000 maxQty=500000000 mdPriceIncrement=5 mdLevels=5 mdIntervalMs=5 minTtlMicros=5000 takerRaceMicros=5000 queueCancels=true matchPriority=VISIBILITY
-instrument 2 EUR/USD 1M type=SWAP precision=5 priceIncrement=1 minQty=1000000 qtyIncrement=100000 maxQty=500000000 mdPriceIncrement=1 minTtlMicros=5000 matchPriority=PRICE
+# SWAP and NDF stay disabled until their economics are agreed (PLAN D10).
+# instrument 2 EUR/USD 1M type=SWAP precision=5 priceIncrement=1 minQty=1000000 qtyIncrement=100000 maxQty=500000000 mdPriceIncrement=1 minTtlMicros=5000 matchPriority=PRICE
 fixing 0 WMR16 16:00 Europe/London 15:55
 entitle 1 1
 entitle 2 2

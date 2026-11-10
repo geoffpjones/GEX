@@ -11,8 +11,12 @@ public final class Main {
     private Main() {}
 
     public static void main(String[] args) throws Exception {
+        if (args.length == 2 && "hash-password".equals(args[0])) {
+            System.out.println(clob.fix.FixSessionConfig.hash(args[1]));
+            return;
+        }
         if (args.length != 2) {
-            System.err.println("usage: clob primary|standby|audit <node.properties>");
+            System.err.println("usage: clob primary|standby|audit <node.properties> | clob hash-password <password>");
             System.exit(2);
         }
         NodeConfig cfg = NodeConfig.load(Path.of(args[1]));

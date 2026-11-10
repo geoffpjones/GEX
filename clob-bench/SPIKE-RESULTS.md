@@ -178,3 +178,20 @@ $B --events 10000000 --warmup 5000000 --rate 2000000              # paced, CO-co
 $B --events 20000000 --warmup 5000000 --credit false --timing false
 $B --mode journal --journal /path/journal.dat --events 20000000   # journal stage alone
 ```
+
+## Whole-node capacity (M7, first runs, 2026-11-08)
+
+`CapacityHarness`: a real `ClobNode` with sequencer, journal, engine, market data replica, gateway and ops, on the development VM (4 shared vCPUs, 2.6 GB, backoff idle strategies, 1 GB heap, harness in the same process). 20 s runs, 64 accounts, 200 resting orders per book, each book with one unscreened and eight screened subscribers, 20% of relationships limited.
+
+| Books | Target inputs/s | Publish threads | Sustained inputs/s | MD cycle p50 / p99 | Overruns of the 5 ms tick | Boundary to delivery p50 / p99 |
+|---|---|---|---|---|---|---|
+| 200 | 20,000 | 1 | 11,871 | 13.9 / 135 ms | 426 of 1,387 | 841 / 2,676 ms |
+| 200 | 20,000 | 3 | 12,641 | 3.2 / 89.7 ms | 337 of 1,320 | 862 / 2,267 ms |
+| 200 | 5,000 | 3 | 4,999 | 5.7 / 43.4 ms | 1,403 of 2,991 | 1,254 / 4,272 ms |
+| 20 | 20,000 | 1 | 15,410 | 5.3 / 114 ms | 523 of 1,539 | 548 / 2,012 ms |
+
+**Reading these.** On this host the market data follower is the bottleneck: it back-pressures the sequencer, and delivery runs seconds behind the boundary. The requirement that every consumer receives each update within the interval is not met here. Heap stayed small (66 to 116 MB after GC over a run) and no run failed or lost readiness. Delivery latency includes the follower's backlog, and the harness competes with six node threads for four shared vCPUs, so these numbers are a lower bound on the design and say little about target hardware. They do show that the repeated full-engine replica plus per-subscriber headroom builds is the first thing to measure on real hardware.
+
+**Not done.** The target-hardware run, the adversarial depth/account/race limits and the day-long soak. M7's exit is "meets D8", and D8 has no numbers yet.
+
+Reproduce: `./gradlew :clob-bench:capacity --args="200 64 20000 20 8 3 200 20"` (books, accounts, inputs/s, seconds, screened subscribers, publish threads, resting orders per book, limited percent).

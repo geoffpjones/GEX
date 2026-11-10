@@ -54,6 +54,7 @@ class SequencerTest {
         try (Journal j = Journal.open(dir, 8192)) {
             Sequencer s = new Sequencer(j, () -> clock[0], d, 0, 0);
             s.onCommand(buf, 0, InputCodec.creditLine(buf, 0, 1, 1, CreditType.UNLIMITED, 0));
+            s.onCommand(buf, 0, InputCodec.valueDates(buf, 0, 1, 20_000, -1));
             NewOrderCommand c = new NewOrderCommand();
             c.orderId = 1; c.instrumentId = 1; c.accountId = 1; c.userId = 1; c.side = Side.BUY;
             c.type = OrderType.LIMIT; c.tif = TimeInForce.GTT; c.price = 95; c.qty = 1000;
@@ -66,7 +67,32 @@ class SequencerTest {
         }
         assertTrue(rec.events().contains(new Event.Cancelled(Fixture.T0 + 10 * Fixture.MS, 1, CancelReason.EXPIRED, 1000)),
                 "expired at its deadline, triggered by the injected time input");
-        assertEquals(3, Journal.replay(dir, (b, o, l) -> { }), "the time input is journalled");
+        assertEquals(4, Journal.replay(dir, (b, o, l) -> { }), "the time input is journalled");
         assertTrue(CreditEngine.RATE_SCALE > 0);
+    }
+
+    @Test
+    void endOfDayFiresAtTheLocalTimeAcrossDstAndOnceAfterAnOutage() {
+        java.time.ZoneId ny = java.time.ZoneId.of("America/New_York");
+        java.time.LocalTime five = java.time.LocalTime.of(17, 0);
+        long summer = java.time.ZonedDateTime.of(2026, 7, 1, 16, 59, 0, 0, ny).toEpochSecond() * 1_000_000_000L;
+        long[] clock = {summer};
+        List<Integer> types = new ArrayList<>();
+        try (Journal j = Journal.open(dir, 1 << 16)) {
+            Sequencer s = new Sequencer(j, () -> clock[0], (b, o, l) -> types.add(InputCodec.type(b, o)), 0, 0);
+            s.enableEndOfDay(five, ny);
+            s.poll(Long.MAX_VALUE);
+            assertEquals(List.of(), types, "not yet");
+            clock[0] = summer + 60_000_000_000L; // exactly 17:00 EDT
+            s.poll(Long.MAX_VALUE);
+            assertEquals(List.of(InputCodec.END_OF_DAY), types);
+            clock[0] += 3_600_000_000_000L * 24 * 30; // a month later, as if the node had been down
+            s.poll(Long.MAX_VALUE);
+            s.poll(Long.MAX_VALUE);
+            assertEquals(2, types.size(), "one catch-up cut, not thirty");
+        }
+        // On a day whose offset differs (EST), 17:00 is 22:00 UTC rather than 21:00.
+        long winter = java.time.ZonedDateTime.of(2026, 12, 1, 17, 0, 0, 0, ny).toEpochSecond();
+        assertEquals(22, java.time.Instant.ofEpochSecond(winter).atZone(java.time.ZoneOffset.UTC).getHour());
     }
 }

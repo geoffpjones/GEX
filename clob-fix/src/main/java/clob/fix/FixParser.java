@@ -10,6 +10,8 @@ final class FixParser {
     static final byte SOH = 1;
     private static final byte[] BEGIN = "8=FIX.4.4\u00019=".getBytes(StandardCharsets.US_ASCII);
     private static final int MAX_FIELDS = 256;
+    /** Largest message accepted: the connection's whole read buffer. */
+    static final int MAX_MESSAGE = 1 << 16;
 
     private final int[] tags = new int[MAX_FIELDS];
     private final int[] valueStart = new int[MAX_FIELDS];
@@ -44,7 +46,13 @@ final class FixParser {
         if (p >= off + len) {
             return 0;
         }
+        if (digits == 0) {
+            return -1;
+        }
         int total = (p + 1 - off) + bodyLength + 7; // "10=NNN<SOH>"
+        if (total > MAX_MESSAGE) {
+            return -1;
+        }
         return len >= total ? total : 0;
     }
 
@@ -59,7 +67,7 @@ final class FixParser {
         while (p < end) {
             int tag = 0;
             while (p < end && b[p] != '=') {
-                if (b[p] < '0' || b[p] > '9') {
+                if (b[p] < '0' || b[p] > '9' || tag > 99_999_999) {
                     return "bad tag";
                 }
                 tag = tag * 10 + (b[p] - '0');
@@ -92,14 +100,22 @@ final class FixParser {
         if (count < 4 || tags[0] != 8 || tags[1] != 9 || tags[2] != 35 || tags[count - 1] != 10) {
             return "bad header or trailer";
         }
-        if (checksumStart - bodyStart != (int) asLong(9)) {
+        long declared;
+        long declaredSum;
+        try {
+            declared = asLong(9);
+            declaredSum = asLong(10);
+        } catch (NumberFormatException e) {
+            return "bad BodyLength or CheckSum";
+        }
+        if (checksumStart - bodyStart != declared) {
             return "bad BodyLength";
         }
         int sum = 0;
         for (int i = off; i < checksumStart; i++) {
             sum += b[i];
         }
-        if ((sum & 0xFF) != asLong(10)) {
+        if ((sum & 0xFF) != declaredSum) {
             return "bad CheckSum";
         }
         return null;
@@ -153,12 +169,19 @@ final class FixParser {
         if (neg) {
             p++;
         }
+        if (p == end) {
+            throw new NumberFormatException("tag " + tag + " has no digits");
+        }
         long v = 0;
-        for (; p < end; p++) {
-            if (buf[p] < '0' || buf[p] > '9') {
-                throw new NumberFormatException("tag " + tag + " is not an integer");
+        try {
+            for (; p < end; p++) {
+                if (buf[p] < '0' || buf[p] > '9') {
+                    throw new NumberFormatException("tag " + tag + " is not an integer");
+                }
+                v = Math.addExact(Math.multiplyExact(v, 10), buf[p] - '0');
             }
-            v = v * 10 + (buf[p] - '0');
+        } catch (ArithmeticException e) {
+            throw new NumberFormatException("tag " + tag + " is out of range");
         }
         return neg ? -v : v;
     }
@@ -180,6 +203,8 @@ final class FixParser {
         }
         long v = 0;
         int frac = -1;
+        int digits = 0;
+        try {
         for (; p < end; p++) {
             byte c = buf[p];
             if (c == '.') {
@@ -192,6 +217,7 @@ final class FixParser {
             if (c < '0' || c > '9') {
                 throw new NumberFormatException("tag " + tag + " is not a decimal");
             }
+            digits++;
             if (frac >= 0) {
                 frac++;
                 if (frac > decimals) {
@@ -201,10 +227,16 @@ final class FixParser {
                     continue;
                 }
             }
-            v = Math.multiplyExact(v, 10) + (c - '0');
+            v = Math.addExact(Math.multiplyExact(v, 10), c - '0');
+        }
+        if (digits == 0) {
+            throw new NumberFormatException("tag " + tag + " has no digits");
         }
         for (int k = Math.max(frac, 0); k < decimals; k++) {
             v = Math.multiplyExact(v, 10);
+        }
+        } catch (ArithmeticException e) {
+            throw new NumberFormatException("tag " + tag + " is out of range");
         }
         return neg ? -v : v;
     }

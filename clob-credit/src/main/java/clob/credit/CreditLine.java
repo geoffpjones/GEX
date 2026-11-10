@@ -22,19 +22,6 @@ final class CreditLine {
     /** Sum of {@link #net} over all open dates (NOP). */
     long netTotal;
 
-    /** Dry-run overlay (see {@link CreditEngine#beginSimulation()}): one instrument's near/far dates. */
-    boolean shadowed;
-    long shadowNear;
-    long shadowFar;
-    long shadowNet;
-
-    void clearShadow() {
-        shadowed = false;
-        shadowNear = 0;
-        shadowFar = 0;
-        shadowNet = 0;
-    }
-
     int indexOf(int date) {
         for (int i = 0; i < size; i++) {
             if (dates[i] == date) {
@@ -49,6 +36,12 @@ final class CreditLine {
         return i < 0 ? 0 : gross[i];
     }
 
+    long netAt(int date) {
+        int i = indexOf(date);
+        return i < 0 ? 0 : net[i];
+    }
+
+    /** Applies a fill already proved to fit by {@link CreditEngine#capacity}. */
     void add(int date, long grossAmount, long signedAmount) {
         int i = indexOf(date);
         if (i < 0) {
@@ -63,17 +56,22 @@ final class CreditLine {
             gross[i] = 0;
             net[i] = 0;
         }
-        gross[i] = Math.addExact(gross[i], grossAmount);
-        net[i] = Math.addExact(net[i], signedAmount);
-        netTotal = Math.addExact(netTotal, signedAmount);
+        gross[i] += grossAmount;
+        net[i] += signedAmount;
+        netTotal += signedAmount;
     }
 
-    /** Releases usage for value dates before {@code today} (settled). */
+    /**
+     * Releases usage for value dates before {@code today} (settled). A SWAP's far leg stays open once
+     * its near leg settles, so the net can move here with no trade; it saturates at
+     * {@link CreditEngine#MAX_BUCKET_E8}, which is far above any limit.
+     */
     void roll(int today) {
         int w = 0;
         for (int i = 0; i < size; i++) {
             if (dates[i] < today) {
-                netTotal -= net[i];
+                netTotal = Math.max(-CreditEngine.MAX_BUCKET_E8,
+                        Math.min(CreditEngine.MAX_BUCKET_E8, netTotal - net[i]));
             } else {
                 dates[w] = dates[i];
                 gross[w] = gross[i];

@@ -65,6 +65,7 @@ public final class Scenario {
         this.engine = new MatchingEngine(refData, config, new CreditEngine(PARTIES, refData), recorder);
         engine.onUsdRate(instrument.baseCurrency(), CreditEngine.RATE_SCALE, 0);
         engine.onValueDates(instrument.id(), SPOT_DATE, FAR_DATE, 0);
+        recorder.clear(); // the opening data resume is set-up, not part of any scenario
     }
 
     private static Scenario create(Instrument instrument) {
@@ -78,6 +79,11 @@ public final class Scenario {
             b.entitle(i, i);
         }
         return new Scenario(instrument, b.build(), seed);
+    }
+
+    /** Custom reference data (for example with legal entities) and no credit relationships. */
+    public static Scenario withRefData(Instrument instrument, RefData refData) {
+        return new Scenario(instrument, refData, EngineConfig.defaults().randomSeed());
     }
 
     /** Every pair of different accounts can trade, without limit. */
@@ -230,6 +236,17 @@ public final class Scenario {
         return this;
     }
 
+    /** A participant cancel carrying a request id, so its outcome can be correlated. */
+    public Scenario cancelRequest(long orderId, long requestId) {
+        OrderSpec spec = sent.get(orderId);
+        engine.onCancel(orderId, spec == null ? 1 : spec.user, CancelSource.PARTICIPANT, requestId, now);
+        return this;
+    }
+
+    public List<String> requestLog() {
+        return List.copyOf(recorder.requestLog());
+    }
+
     public Scenario cancelAs(long orderId, int userId) {
         engine.onCancel(orderId, userId, CancelSource.PARTICIPANT, now);
         return this;
@@ -368,6 +385,7 @@ public final class Scenario {
         private long show;
         private int user;
         private long discretion;
+        private long requestId;
 
         ReplaceSpec(OrderSpec order) {
             this.order = order;
@@ -384,10 +402,12 @@ public final class Scenario {
         public ReplaceSpec qty(long qty) { this.qty = qty; return this; }
         public ReplaceSpec show(long show) { this.show = show; return this; }
         public ReplaceSpec user(int user) { this.user = user; return this; }
+        public ReplaceSpec requestId(long requestId) { this.requestId = requestId; return this; }
 
         public Scenario send() {
             ReplaceCommand c = replace.reset();
             c.orderId = order.id;
+            c.requestId = requestId;
             c.userId = user;
             c.price = price;
             c.qty = qty;

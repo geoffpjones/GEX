@@ -25,6 +25,11 @@ final class AppFixture {
     static final HttpClient HTTP = HttpClient.newHttpClient();
 
     static NodeConfig config(Path dir, String name, int replicationPort, int primaryReplicationPort) throws IOException {
+        return config(dir, name, replicationPort, primaryReplicationPort, new Properties());
+    }
+
+    static NodeConfig config(Path dir, String name, int replicationPort, int primaryReplicationPort, Properties extra)
+            throws IOException {
         Path refData = dir.resolve("refdata.txt");
         if (!Files.exists(refData)) {
             Files.writeString(refData, """
@@ -45,6 +50,7 @@ final class AppFixture {
         p.setProperty("admin.token", TOKEN);
         p.setProperty("replication.port", String.valueOf(replicationPort));
         p.setProperty("replication.primaryPort", String.valueOf(primaryReplicationPort));
+        p.putAll(extra);
         return NodeConfig.from(p, dir);
     }
 
@@ -101,6 +107,14 @@ final class AppFixture {
                 throw new AssertionError("timed out waiting for " + what);
             }
             Thread.sleep(10);
+        }
+    }
+
+    static String get0(int port) {
+        try {
+            return get(port, "/metrics");
+        } catch (Exception e) {
+            return "";
         }
     }
 

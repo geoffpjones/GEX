@@ -73,7 +73,7 @@ final class SpikeListener implements EngineListener {
     }
 
     @Override
-    public void onOrderCancelled(long time, long orderId, CancelReason reason, long cancelledQty) {
+    public void onOrderCancelled(long time, long orderId, CancelReason reason, long cancelledQty, long requestId) {
         int p = claim();
         out.putByte(p, (byte) 4);
         out.putLong(p + 8, time);
@@ -83,7 +83,7 @@ final class SpikeListener implements EngineListener {
     }
 
     @Override
-    public void onOrderReplaced(long time, long orderId, long price, long qty, long leaves) {
+    public void onOrderReplaced(long time, long orderId, long price, long qty, long leaves, long requestId) {
         int p = claim();
         out.putByte(p, (byte) 5);
         out.putLong(p + 8, time);
@@ -94,7 +94,7 @@ final class SpikeListener implements EngineListener {
     }
 
     @Override
-    public void onRequestRejected(long time, long orderId, RequestType type, RequestRejectReason reason) {
+    public void onRequestRejected(long time, long orderId, RequestType type, RequestRejectReason reason, long requestId) {
         int p = claim();
         out.putByte(p, (byte) 6);
         out.putLong(p + 8, time);
@@ -161,7 +161,7 @@ final class SpikeListener implements EngineListener {
     }
 
     @Override
-    public void onRequestQueued(long time, long orderId, RequestType type, long releaseTime) {
+    public void onRequestQueued(long time, long orderId, RequestType type, long releaseTime, long requestId) {
         int p = claim();
         out.putByte(p, (byte) 7);
         out.putLong(p + 8, time);

@@ -25,8 +25,15 @@ public final class OpsAgent implements Agent, AutoCloseable {
     private final BufferedWriter dropCopy;
     private final BufferedWriter trades;
     private int sinceFlush;
+    private final Runnable onEndOfDay;
 
     public OpsAgent(OutputRing ring, Metrics metrics, Path dataDir) {
+        this(ring, metrics, dataDir, () -> { });
+    }
+
+    /** {@code onEndOfDay} runs on this agent's thread at each end-of-day cut, and must not block. */
+    public OpsAgent(OutputRing ring, Metrics metrics, Path dataDir, Runnable onEndOfDay) {
+        this.onEndOfDay = onEndOfDay;
         this.ring = ring;
         this.metrics = metrics;
         try {
@@ -74,9 +81,15 @@ public final class OpsAgent implements Agent, AutoCloseable {
                             + e.priceDecimals + "," + e.qty + "\n");
                 }
                 case OutputEncoder.CANCELLED -> metrics.inc(
-                        "clob_cancels_total{reason=\"" + CancelReason.values()[e.reason] + "\"}", 1);
+                        "clob_cancels_total{reason=\"" + clob.sequencer.Wire.CANCEL_REASONS.of(e.reason) + "\"}", 1);
                 case OutputEncoder.RACE_STARTED -> metrics.inc("clob_races_total", 1);
                 case OutputEncoder.SESSION_STATE -> metrics.inc("clob_session_changes_total", 1);
+                case OutputEncoder.END_OF_DAY -> onEndOfDay.run();
+                case OutputEncoder.CREDIT_LIMIT_BREACHED -> {
+                    metrics.inc("clob_credit_limit_breaches_total", 1);
+                    System.err.println("ALERT credit line " + e.lineId + " over limit: usageE8=" + e.usageE8
+                            + " limitE8=" + e.limitE8);
+                }
                 default -> { }
             }
         } catch (IOException ex) {

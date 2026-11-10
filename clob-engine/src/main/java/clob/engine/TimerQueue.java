@@ -61,6 +61,62 @@ final class TimerQueue {
         }
     }
 
+    @FunctionalInterface
+    interface Filter {
+        boolean keep(byte kind, long id);
+    }
+
+    /**
+     * Drops timers the filter rejects, so cancelled long-dated timers don't accumulate. Remaining
+     * timers keep their (deadline, sequence) order, so firing order is unaffected.
+     */
+    void compact(Filter filter) {
+        int w = 0;
+        for (int i = 0; i < size; i++) {
+            if (filter.keep(kinds[i], ids[i])) {
+                if (w != i) {
+                    copy(i, w);
+                }
+                w++;
+            }
+        }
+        size = w;
+        for (int i = (size >>> 1) - 1; i >= 0; i--) {
+            siftDown(i);
+        }
+    }
+
+    int size() {
+        return size;
+    }
+
+    void save(java.io.DataOutput out) throws java.io.IOException {
+        out.writeLong(nextSeq);
+        out.writeInt(size);
+        for (int i = 0; i < size; i++) {
+            out.writeLong(times[i]);
+            out.writeLong(seqs[i]);
+            out.writeLong(ids[i]);
+            out.writeByte(kinds[i]);
+        }
+    }
+
+    void restore(java.io.DataInput in) throws java.io.IOException {
+        nextSeq = in.readLong();
+        size = in.readInt();
+        int capacity = Math.max(times.length, Math.max(size, 1));
+        times = new long[capacity];
+        seqs = new long[capacity];
+        ids = new long[capacity];
+        kinds = new byte[capacity];
+        for (int i = 0; i < size; i++) {
+            times[i] = in.readLong();
+            seqs[i] = in.readLong();
+            ids[i] = in.readLong();
+            kinds[i] = in.readByte();
+        }
+    }
+
     private boolean less(int a, int b) {
         return times[a] < times[b] || (times[a] == times[b] && seqs[a] < seqs[b]);
     }

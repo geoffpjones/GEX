@@ -31,6 +31,7 @@ final class MidMatcher {
     static final long SUB_TICKS = 10;
 
     private final MatchingEngine engine;
+    private boolean selfTradeInDryRun;
 
     MidMatcher(MatchingEngine engine) {
         this.engine = engine;
@@ -42,7 +43,7 @@ final class MidMatcher {
         long ask = book.referenceAsk();
         boolean live = bid != NO_PRICE && ask != NO_PRICE;
         if (o.tif == TimeInForce.FOK && (!live || fillable(o, book, mid10(bid, ask)) < o.leaves)) {
-            engine.terminate(o, CancelReason.FOK_UNFILLED, time);
+            engine.terminate(o, selfTradeInDryRun ? CancelReason.SELF_TRADE : CancelReason.FOK_UNFILLED, time);
             return;
         }
         if (live) {
@@ -51,12 +52,17 @@ final class MidMatcher {
         if (o.residualCancelQty > 0) {
             long qty = o.residualCancelQty;
             o.residualCancelQty = 0;
-            engine.listener.onOrderCancelled(time, o.orderId, CancelReason.RESIDUAL_BELOW_MIN_QTY, qty);
+            engine.listener.onOrderCancelled(time, o.orderId, CancelReason.RESIDUAL_BELOW_MIN_QTY, qty, 0);
             engine.release(o, time);
             return;
         }
         if (o.leaves == 0) {
             engine.release(o, time);
+            return;
+        }
+        if (o.selfTradeHit) {
+            o.selfTradeHit = false;
+            engine.terminate(o, CancelReason.SELF_TRADE, time);
             return;
         }
         switch (o.tif) {
@@ -96,7 +102,11 @@ final class MidMatcher {
                     boolean buyIsLater = b.prioritySeq > s.prioritySeq;
                     Order agg = buyIsLater ? b : s;
                     Order passive = buyIsLater ? s : b;
-                    tryFill(agg, passive, buyLimit, sellLimit, mid10, book, time, true);
+                    if (engine.credit.sameEntity(agg.accountId, passive.accountId)) {
+                        engine.cancelResting(agg, CancelReason.SELF_TRADE, time); // the later order is the aggressor
+                    } else {
+                        tryFill(agg, passive, buyLimit, sellLimit, mid10, book, time, true);
+                    }
                 }
                 s = nextSell;
             }
@@ -132,6 +142,10 @@ final class MidMatcher {
             long buyLimit = agg.side == Side.BUY ? aggLimit : pLimit;
             long sellLimit = agg.side == Side.BUY ? pLimit : aggLimit;
             if (buyLimit >= sellLimit) {
+                if (engine.credit.sameEntity(agg.accountId, p.accountId)) {
+                    agg.selfTradeHit = true;
+                    return;
+                }
                 tryFill(agg, p, buyLimit, sellLimit, mid10, book, time, false);
             }
             p = next;
@@ -175,7 +189,7 @@ final class MidMatcher {
             o.queue.remove(o);
             long residual = o.leaves;
             o.leaves = 0;
-            engine.listener.onOrderCancelled(time, o.orderId, CancelReason.RESIDUAL_BELOW_MIN_QTY, residual);
+            engine.listener.onOrderCancelled(time, o.orderId, CancelReason.RESIDUAL_BELOW_MIN_QTY, residual, 0);
             engine.release(o, time);
         }
     }
@@ -185,6 +199,7 @@ final class MidMatcher {
         Instrument instrument = book.instrument;
         long aggLimit = limit10(agg, mid10);
         long remaining = agg.leaves;
+        selfTradeInDryRun = false;
         engine.credit.beginSimulation();
         try {
             for (Order p = queue(book, agg.side.opposite()).head; p != null && remaining > 0; p = p.next) {
@@ -193,6 +208,10 @@ final class MidMatcher {
                 long sellLimit = agg.side == Side.BUY ? pLimit : aggLimit;
                 if (buyLimit < sellLimit) {
                     continue;
+                }
+                if (engine.credit.sameEntity(agg.accountId, p.accountId)) {
+                    selfTradeInDryRun = true;
+                    break;
                 }
                 long qty = Math.min(remaining, p.leaves);
                 long cap = engine.credit.capacity(agg.accountId, p.accountId, instrument.id(), agg.side);

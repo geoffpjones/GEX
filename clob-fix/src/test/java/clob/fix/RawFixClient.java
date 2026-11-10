@@ -40,6 +40,15 @@ final class RawFixClient implements AutoCloseable {
         send("A", 98, 0, 108, 30, 141, "Y", 553, user, 554, password);
     }
 
+    /** Logon keeping sequence numbers, for a client resuming its session. */
+    void logonResume(String user, String password) throws IOException {
+        send("A", 98, 0, 108, 30, 553, user, 554, password);
+    }
+
+    void sendRaw(byte[] bytes) throws IOException {
+        ch.write(ByteBuffer.wrap(bytes));
+    }
+
     /** Next message as tag → value (last occurrence wins), or null on timeout/close. */
     Map<Integer, String> read(long timeoutMillis) throws IOException {
         long deadline = System.currentTimeMillis() + timeoutMillis;

@@ -26,12 +26,18 @@ final class FillSimulator {
     private long remaining;
     private long filled;
     private boolean killed;
+    private boolean selfTrade;
 
     FillSimulator(CreditEngine credit) {
         this.credit = credit;
     }
 
     /** Quantity the aggressor would fill if matched now; less than its leaves if it would not complete. */
+    /** After {@link #fillable}: the walk stopped at a resting order of the aggressor's own account or entity. */
+    boolean hitSelfTrade() {
+        return selfTrade;
+    }
+
     long fillable(Order aggressor, OrderBook book) {
         credit.beginSimulation();
         try {
@@ -49,6 +55,7 @@ final class FillSimulator {
         remaining = aggressor.leaves;
         filled = 0;
         killed = false;
+        selfTrade = false;
         int top = -1;
         if (instrument.matchPriority() == MatchPriority.VISIBILITY) {
             for (int i = 0; i < opp.size() && !done(); i++) {
@@ -86,6 +93,11 @@ final class FillSimulator {
 
     /** Fill quantity against an order, or 0 if the real walk would skip it. Records the fill. */
     private long tryTake(int passiveAccount, long available) {
+        if (credit.sameEntity(agg.accountId, passiveAccount)) {
+            selfTrade = true;
+            killed = true;
+            return 0;
+        }
         long qty = Math.min(remaining, available);
         long cap = credit.capacity(agg.accountId, passiveAccount, instrument.id(), agg.side);
         if (cap < qty) {

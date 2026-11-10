@@ -12,5 +12,9 @@ public enum CancelReason {
     EXPIRED,
     END_OF_DAY,
     /** FIXING: unmatched quantity at the event's cut-off. */
-    FIXING_CUTOFF
+    FIXING_CUTOFF,
+    /** The aggressor reached a resting order of its own account or legal entity. */
+    SELF_TRADE,
+    /** The order was waiting in a race when the instrument halted. */
+    HALTED
 }

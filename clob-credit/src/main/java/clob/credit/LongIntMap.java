@@ -79,6 +79,20 @@ final class LongIntMap {
         return size;
     }
 
+    @FunctionalInterface
+    interface EntryConsumer {
+        void accept(long key, int value) throws java.io.IOException;
+    }
+
+    /** Visits every entry. Order follows the table, so callers must not depend on it. */
+    void forEach(EntryConsumer consumer) throws java.io.IOException {
+        for (int i = 0; i < keys.length; i++) {
+            if (used[i]) {
+                consumer.accept(keys[i], values[i]);
+            }
+        }
+    }
+
     void clear() {
         Arrays.fill(used, false);
         size = 0;

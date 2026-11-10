@@ -39,6 +39,9 @@ final class Order {
     long pendingQty;
     long pendingMaxShow;
     long pendingDiscretion;
+    long pendingRequestId;
+    /** The participant cancel request being applied; reported with the cancel. */
+    long cancelRequestId;
 
     /** PEGGED and MID: pips; positive is more aggressive. */
     long discretion;
@@ -57,8 +60,13 @@ final class Order {
     boolean fresh;
     /** A queued cancel/replace also waiting for a taker race to finish (queue-cancels). */
     boolean heldByRace;
-    /** The latest taker race running on the book when the request arrived; the hold ends when it resolves. */
+    /** The taker race holding the request; the hold ends when that race resolves. */
     long holdUntilRace;
+    long holdRaceExpiry;
+    /** Waiting in a taker race ticket. */
+    boolean inTakerRace;
+    /** Reached a resting order of its own account or legal entity; its remainder is cancelled. */
+    boolean selfTradeHit;
 
     Order prev;
     Order next;
@@ -90,6 +98,8 @@ final class Order {
         pendingQty = 0;
         pendingMaxShow = 0;
         pendingDiscretion = 0;
+        pendingRequestId = 0;
+        cancelRequestId = 0;
         discretion = 0;
         pegReference = null;
         suspended = false;
@@ -101,6 +111,9 @@ final class Order {
         fresh = false;
         heldByRace = false;
         holdUntilRace = 0;
+        holdRaceExpiry = 0;
+        inTakerRace = false;
+        selfTradeHit = false;
         prev = null;
         next = null;
         level = null;

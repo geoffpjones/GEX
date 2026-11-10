@@ -69,12 +69,11 @@ class VisibilityPriorityTest {
         }
 
         @Test
-        void unmatchedSellAtHiddenPriceRestsAndLocksAgainstHiddenBid() {
-            // Consequence of VISIBILITY worth confirming with the business (reported as an open question).
+        void sellThatRestsAtTheHiddenPriceTradesWithTheHiddenBid() {
             s.sell(10).limit(93).qty(1000).day().send();
-            assertEquals(List.of(), s.fills());
-            assertEquals(List.of(10L), s.book().orderIdsAt(Side.SELL, 93));
-            assertEquals(List.of(1L), s.book().orderIdsAt(Side.BUY, 93));
+            assertEquals(List.of(fill(1, 93, 1000)), s.fills());
+            assertEquals(List.of(), s.book().orderIdsAt(Side.SELL, 93));
+            assertEquals(List.of(), s.book().orderIdsAt(Side.BUY, 93));
         }
     }
 

@@ -17,8 +17,9 @@ import java.util.Random;
 import org.junit.jupiter.api.Test;
 
 /**
- * Guards the zero-allocation claim: after warm-up, a realistic mixed flow (every order type, credit
- * limits, pegs, mid, races, cancels and amends) must not allocate on the engine thread.
+ * Guards the zero-allocation claim: after warm-up, a mixed flow (every order type including fixing,
+ * credit limits, pegs, mid, races, cancels and amends) must not allocate on the engine thread. Scope:
+ * this measures the engine with a null listener, not the running node.
  */
 class AllocationTest {
     static final int ACCOUNTS = 32;
@@ -31,6 +32,8 @@ class AllocationTest {
                         .pegThrottleNanos(20_000).matchPriority(MatchPriority.VISIBILITY).build())
                 .add(Instrument.builder(1, "USD/JPY", "SPOT").pricePrecision(0).minQty(1000).qtyIncrement(1000)
                         .maxQty(1_000_000).minTtlNanos(500).matchPriority(MatchPriority.PRICE).build());
+        rb.addFixingEvent(new clob.refdata.FixingEvent(0, "TEST", java.time.LocalTime.of(16, 0), java.time.ZoneId.of("UTC"),
+                java.time.LocalTime.of(15, 55)));
         for (int a = 1; a <= ACCOUNTS; a++) {
             rb.entitle(a, a);
         }
@@ -94,6 +97,12 @@ class AllocationTest {
             long count = 0;
             for (int i = 0; i < events; i++) {
                 time += 1 + r.nextInt(400);
+                if (i % 2000 == 0) {
+                    // A short fixing occurrence: price the last one, then open the next.
+                    e.onFixingRate(0, 0, 95, time);
+                    e.onFixingRate(0, 1, 95, time);
+                    e.onFixingSchedule(0, time + 200_000, time + 200_000, time);
+                }
                 int roll = r.nextInt(100);
                 int account = 1 + r.nextInt(ACCOUNTS);
                 if (roll < 55) {
@@ -124,9 +133,13 @@ class AllocationTest {
                         c.type = OrderType.PEGGED;
                         c.pegReference = r.nextBoolean() ? PegReference.MID : PegReference.NEAR_TOUCH;
                         c.discretion = r.nextInt(3) - 1;
-                    } else if (kind < 9) {
+                    } else if (kind < 9 && r.nextBoolean()) {
                         c.type = OrderType.MID;
                         c.discretion = r.nextInt(3) - 1;
+                    } else if (kind < 9) {
+                        c.type = OrderType.FIXING;
+                        c.fixingEventId = 0;
+                        c.tif = TimeInForce.DAY;
                     } else {
                         c.type = OrderType.MARKET;
                         c.tif = TimeInForce.IOC;

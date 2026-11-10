@@ -14,7 +14,11 @@ FIX 4.4 order entry for the CLOB. The gateway is the acceptor, with `SenderCompI
 | Logout (5) | Answered with a Logout, then the connection is closed. |
 | Reject (3) | Sent when a required tag is missing (373=1, with RefTagID 371). |
 
-**Limitation:** sequence numbers and the resend store are held in memory. After a gateway restart, log on with ResetSeqNumFlag=Y (PLAN Q41).
+**Sessions outlive connections.** Sequence numbers, the resend store and order ownership belong to the configured session. A client that reconnects or logs on after a restart without 141=Y resumes its sequence numbers, and can recover reports it missed with a ResendRequest. The last 131,072 application messages are kept; older ones are gap-filled. Market data snapshots are not stored, and are gap-filled.
+
+**After a failover to the standby** sequence numbers do not carry over. Log on with ResetSeqNumFlag=Y and reconcile with OrderStatusRequest (H) using ClOrdID `*`. Your orders and their ClOrdIDs are still yours.
+
+**Message checks.** SenderCompID and TargetCompID must match the session on every message. A malformed message ends only that session.
 
 **Throttling:** each session has a message-rate limit (token bucket). Messages over the limit get a BusinessMessageReject (j) with 380=99 and Text "Throttled", and are not processed.
 
@@ -28,7 +32,7 @@ Required tags: 11, 54, 38, 55, 1.
 
 | Tag | Field | Notes |
 |---|---|---|
-| 11 | ClOrdID | Must be unique per session. A duplicate is rejected (150=8, 103=6). |
+| 11 | ClOrdID | At most 64 characters, and unique across every new order, cancel and replace of the session until end of day. A duplicate new order is rejected (150=8, 103=6). |
 | 1 | Account | Numeric CLOB account. The user must be entitled to it (otherwise rejected with 58=NOT_ENTITLED). |
 | 55 | Symbol | e.g. `EUR/USD` |
 | 20013 | Tenor | `SPOT` (default), `1M`, … Symbol and tenor together identify the instrument. |
@@ -41,11 +45,11 @@ Required tags: 11, 54, 38, 55, 1.
 | 1094 | PegPriceType | Pegged orders: 2 = Mid, 5 = Primary (near touch, the default). |
 | 20011 | Discretion | Pips, signed, positive = more aggressive. PEGGED and MID. |
 | 20012 | FixingEventID | FIXING orders. |
-| 59 | TimeInForce | 0 = Day (default), 1 = GTC, 3 = IOC, 4 = FOK, 6 = GTD (treated as GTT, with ExpireTime 126) |
+| 59 | TimeInForce | 0 = Day (default), 1 = GTC, 3 = IOC, 4 = FOK, 6 = GTD (treated as GTT, with ExpireTime 126). Market orders must be IOC or FOK. |
 
 ### OrderCancelRequest (F)
 
-Required tags: 11, 41. OrigClOrdID (41) may be the original ClOrdID or the latest replacement's.
+Required tags: 11, 41. OrigClOrdID (41) may be the original ClOrdID or the latest replacement's. A ClOrdID (11) already used in this session is refused with OrderCancelReject, 102=6.
 
 ### OrderCancelReplaceRequest (G)
 
@@ -58,6 +62,14 @@ Required tags: 11, 41, 38.
 ### OrderMassCancelRequest (q)
 
 Required tags: 11, 530. With Account (1), cancels that account's orders; otherwise cancels all orders of the session's user. Answered with OrderMassCancelReport (r): 531=7 if accepted, 0 if not entitled.
+
+### OrderStatusRequest (H)
+
+Required tag: 11. Answers with an Execution Report (150=I) for that order, or with one report per live order when 11 is `*`.
+
+### MarketDataRequest (V), UDP delivery
+
+Where UDP is enabled on the node, tag 20016 (a port number) delivers the subscription as binary snapshots to that port at the session's own IP address. Every datagram is a full snapshot with a per-subscription sequence number, re-sent periodically even if unchanged. The format is this project's own, not FAST or ITCH.
 
 ## Execution reports (8)
 
@@ -87,7 +99,7 @@ Every report carries:
 | Accepted | 0 New | 0 | |
 | Rejected | 8 Rejected | 8 | 103 (1 unknown symbol, 6 duplicate, 99 other), 58 = engine reason |
 | Fill | F Trade | 1 or 2 | 32 LastQty, 31 LastPx, 20004 TradeID (T{id}{A\|P}) |
-| Cancelled (incl. IOC/FOK remainder, residual below min qty, expiry, end of day, disconnect, fixing cut-off) | 4 Canceled | 4 | 58 = reason |
+| Cancelled (incl. IOC/FOK remainder, residual below min qty, expiry, end of day, disconnect, fixing cut-off, SELF_TRADE, HALTED) | 4 Canceled | 4 | 58 = reason |
 | Replaced | 5 Replaced | current | new ClOrdID in 11, previous in 41 |
 | Cancel/replace queued (min TTL or a running race) | 6 Pending Cancel / E Pending Replace | 6 / E | |
 | Peg repriced or resumed | D Restated | current | 378=3, new Price |
@@ -97,6 +109,6 @@ Every report carries:
 
 **Mid trades** may carry LastPx with one more decimal place than the instrument's precision (for example a half pip).
 
-**OrderCancelReject (9):** 434 CxlRejResponseTo (1 = cancel, 2 = replace) and 102 CxlRejReason (0 = too late, 1 = unknown order, 99 = other), with 58 = engine reason.
+**OrderCancelReject (9):** 434 CxlRejResponseTo (1 = cancel, 2 = replace) and 102 CxlRejReason (0 = too late, 1 = unknown order, 6 = duplicate ClOrdID, 99 = other), with 58 = engine reason. 11 always names the request being answered.
 
 **TradingSessionStatus (h):** sent to every logged-on session when an instrument changes state. 336 = CLOB, 340 TradSesStatus (1 = halted, 2 = open, 3 = closed, 4 = pre-open), 20014 Symbol, 20013 Tenor.

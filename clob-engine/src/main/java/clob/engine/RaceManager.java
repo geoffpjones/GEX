@@ -1,6 +1,9 @@
 package clob.engine;
 
 import clob.common.Side;
+import java.io.DataInput;
+import java.io.DataOutput;
+import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.function.Predicate;
@@ -28,6 +31,11 @@ import org.agrona.collections.Long2ObjectHashMap;
  * seeded from the configured seed and race id), and apply each account's next order to the book as an
  * ordinary order (match, then rest or cancel by TIF). For a maker race this sets time priority.
  * Orders applied from a lottery never re-enter a race.
+ *
+ * <h2>Halts and pre-open</h2>
+ * When an instrument leaves OPEN, orders waiting in its races are cancelled and requests held for those
+ * races are released. Orders entered during pre-open wait in one per-book lottery, whatever their side
+ * or price, which is drawn when the book opens.
  */
 final class RaceManager {
     static final class Ticket {
@@ -43,8 +51,7 @@ final class RaceManager {
         long price;
         long expiry;
         long seed;
-        /** Expired while the instrument was not open; resolves when it reopens. */
-        boolean deferred;
+        boolean preOpen;
         final ArrayList<Ticket> tickets = new ArrayList<>();
     }
 
@@ -73,37 +80,23 @@ final class RaceManager {
         }
     }
 
-    static boolean takerRaceRunning(OrderBook book) {
-        return book.takerRaces[0] != null || book.takerRaces[1] != null;
-    }
-
-    /** Id of the most recently started taker race running on the book, or 0. */
-    static long latestTakerRaceId(OrderBook book) {
-        long id = 0;
-        for (Race r : book.takerRaces) {
-            if (r != null) {
-                id = Math.max(id, r.id);
-            }
-        }
-        return id;
-    }
-
-    /** Latest expiry of the book's running taker races, or {@code Long.MIN_VALUE}. */
-    static long latestTakerExpiry(OrderBook book) {
-        long t = Long.MIN_VALUE;
-        for (Race r : book.takerRaces) {
-            if (r != null) {
-                t = Math.max(t, r.expiry);
-            }
-        }
-        return t;
-    }
-
     void joinTaker(Order o, OrderBook book, long time) {
         Race r = book.takerRaces[o.side.ordinal()];
         if (r == null) {
             r = start(book, true, o.side, 0, time + book.instrument.takerRaceNanos(), time);
             book.takerRaces[o.side.ordinal()] = r;
+        }
+        o.inTakerRace = true;
+        join(r, o, time);
+    }
+
+    /** Collects a pre-open order for the book's lottery at the open. */
+    void joinPreOpen(Order o, OrderBook book, long time) {
+        Race r = book.preOpenRace;
+        if (r == null) {
+            r = start(book, false, o.side, 0, Long.MAX_VALUE, time);
+            r.preOpen = true;
+            book.preOpenRace = r;
         }
         join(r, o, time);
     }
@@ -138,10 +131,12 @@ final class RaceManager {
         r.price = price;
         r.expiry = expiry;
         r.seed = SplitMix64.mix(baseSeed ^ SplitMix64.mix(r.id));
-        r.deferred = false;
+        r.preOpen = false;
         active.put(r.id, r);
         activeList.add(r);
-        engine.schedule(expiry, MatchingEngine.TIMER_RACE, r.id);
+        if (expiry != Long.MAX_VALUE) {
+            engine.schedule(expiry, MatchingEngine.TIMER_RACE, r.id);
+        }
         engine.listener.onRaceStarted(time, r.id, r.instrumentId, taker, side, price, expiry, r.seed);
         return r;
     }
@@ -160,43 +155,73 @@ final class RaceManager {
             r.tickets.add(ticket);
         }
         ticket.orders.add(o);
+        engine.scheduleGtt(o); // a waiting order still expires on time and leaves its ticket
         engine.listener.onOrderJoinedRace(time, o.orderId, r.id);
     }
 
     void onExpiry(long raceId, long deadline) {
         Race r = active.get(raceId);
-        if (r == null || r.expiry != deadline) {
-            return;
+        if (r != null && r.expiry == deadline) {
+            resolve(r, deadline);
         }
-        if (!engine.book(r.instrumentId).isOpen()) {
-            r.deferred = true;
-            return;
-        }
-        resolve(r, deadline);
     }
 
-    /** Resolves, in start order, the book's races that expired while it was not open. */
-    void resolveDeferred(OrderBook book, long time) {
+    /** Draws the book's pre-open lottery. */
+    void resolvePreOpen(OrderBook book, long time) {
+        if (book.preOpenRace != null) {
+            resolve(book.preOpenRace, time);
+        }
+    }
+
+    /** The book left OPEN: cancels every order waiting in its races and frees requests held for them. */
+    void abortAll(OrderBook book, long time) {
         for (int k = 0; k < activeList.size(); ) {
             Race r = activeList.get(k);
-            if (r.deferred && r.instrumentId == book.instrument.id()) {
-                resolve(r, time); // removes r from activeList
-            } else {
+            if (r.instrumentId != book.instrument.id()) {
                 k++;
+                continue;
+            }
+            detach(r, book);
+            for (int i = 0; i < r.tickets.size(); i++) {
+                OrderQueue orders = r.tickets.get(i).orders;
+                while (orders.head != null) {
+                    Order o = orders.head;
+                    o.inTakerRace = false;
+                    engine.cancelResting(o, CancelReason.HALTED, time);
+                }
+            }
+            recycle(r);
+            if (r.taker) {
+                engine.releaseRaceHolds(book, r.id, time);
             }
         }
     }
 
-    private void resolve(Race r, long deadline) {
-        long raceId = r.id;
-        active.remove(raceId);
+    private void detach(Race r, OrderBook book) {
+        active.remove(r.id);
         activeList.remove(r);
-        OrderBook book = engine.book(r.instrumentId);
-        if (r.taker) {
+        if (r.preOpen) {
+            book.preOpenRace = null;
+        } else if (r.taker) {
             book.takerRaces[r.side.ordinal()] = null;
         } else {
             book.makerRaces.remove(r);
         }
+    }
+
+    private void recycle(Race r) {
+        for (int i = 0; i < r.tickets.size(); i++) {
+            ticketPool.add(r.tickets.get(i));
+        }
+        r.tickets.clear();
+        racePool.add(r);
+    }
+
+    private void resolve(Race r, long deadline) {
+        long raceId = r.id;
+        boolean taker = r.taker;
+        OrderBook book = engine.book(r.instrumentId);
+        detach(r, book);
         rng.seed(r.seed);
         while (true) {
             round.clear();
@@ -218,19 +243,92 @@ final class RaceManager {
                 Order o = round.get(i).orders.head;
                 if (o != null) {
                     round.get(i).orders.remove(o);
+                    o.inTakerRace = false;
                     engine.applyRaceOrder(o, book, deadline);
                 }
             }
         }
-        for (int i = 0; i < r.tickets.size(); i++) {
-            ticketPool.add(r.tickets.get(i));
-        }
-        r.tickets.clear();
         round.clear();
-        racePool.add(r);
-        if (r.taker) {
+        recycle(r);
+        if (taker) {
             engine.releaseRaceHolds(book, raceId, deadline);
         }
+    }
+
+    interface OrderWriter {
+        void write(Order o, long raceId, int account) throws IOException;
+    }
+
+    void saveMeta(DataOutput out) throws IOException {
+        out.writeLong(lastRaceId);
+        out.writeInt(activeList.size());
+        for (Race r : activeList) {
+            out.writeLong(r.id);
+            out.writeInt(r.instrumentId);
+            out.writeBoolean(r.taker);
+            out.writeUTF(r.side.name());
+            out.writeLong(r.price);
+            out.writeLong(r.expiry);
+            out.writeLong(r.seed);
+            out.writeBoolean(r.preOpen);
+            out.writeInt(r.tickets.size());
+            for (Ticket t : r.tickets) {
+                out.writeInt(t.account);
+            }
+        }
+    }
+
+    void forEachWaiting(OrderWriter writer) throws IOException {
+        for (Race r : activeList) {
+            for (Ticket t : r.tickets) {
+                for (Order o = t.orders.head; o != null; o = o.next) {
+                    writer.write(o, r.id, t.account);
+                }
+            }
+        }
+    }
+
+    void restoreMeta(DataInput in) throws IOException {
+        lastRaceId = in.readLong();
+        int count = in.readInt();
+        for (int i = 0; i < count; i++) {
+            Race r = racePool.isEmpty() ? new Race() : racePool.poll();
+            r.id = in.readLong();
+            r.instrumentId = in.readInt();
+            r.taker = in.readBoolean();
+            r.side = Side.valueOf(in.readUTF());
+            r.price = in.readLong();
+            r.expiry = in.readLong();
+            r.seed = in.readLong();
+            r.preOpen = in.readBoolean();
+            int tickets = in.readInt();
+            for (int k = 0; k < tickets; k++) {
+                Ticket t = ticketPool.isEmpty() ? new Ticket() : ticketPool.poll();
+                t.account = in.readInt();
+                r.tickets.add(t);
+            }
+            active.put(r.id, r);
+            activeList.add(r);
+            OrderBook book = engine.book(r.instrumentId);
+            if (r.preOpen) {
+                book.preOpenRace = r;
+            } else if (r.taker) {
+                book.takerRaces[r.side.ordinal()] = r;
+            } else {
+                book.makerRaces.add(r);
+            }
+        }
+    }
+
+    void restoreWaiting(Order o, long raceId, int account) {
+        Race r = active.get(raceId);
+        for (int i = 0; i < r.tickets.size(); i++) {
+            if (r.tickets.get(i).account == account) {
+                r.tickets.get(i).orders.add(o);
+                return;
+            }
+        }
+        throw new IllegalStateException("Snapshot names ticket " + account + " missing from race " + raceId);
     }
 
     void collect(Predicate<Order> filter, ArrayList<Order> out) {

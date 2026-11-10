@@ -84,7 +84,7 @@ class LimitAndTifTest {
     @Test
     void marketOrderSweepsAndCancelsRemainder() {
         s.book("1|BUY|1000|92|1000", "2|BUY|1000|91|1000");
-        s.sell(3).market().qty(3000).day().send();
+        s.sell(3).market().qty(3000).ioc().send();
         assertEquals(List.of(fill(1, 92, 1000), fill(2, 91, 1000)), s.fills());
         assertEquals(new Event.Cancelled(0, 3, CancelReason.MARKET_UNFILLED, 1000), s.events().get(s.events().size() - 1));
     }

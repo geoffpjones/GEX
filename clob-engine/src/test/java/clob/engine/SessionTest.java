@@ -39,15 +39,15 @@ class SessionTest {
     }
 
     @Test
-    void raceExpiringDuringAHaltResolvesOnReopen() {
+    void aHaltCancelsOrdersWaitingInARace() {
         Scenario t = Scenario.of(TestInstruments.example(MatchPriority.VISIBILITY).takerRaceNanos(5 * MS).build())
                 .book("1|BUY|1000|92|1000");
         t.sell(10).limit(92).qty(1000).ioc().send();
-        t.session(SessionState.HALTED).advance(10 * MS);
-        assertEquals(List.of(), t.fills());
-        t.session(SessionState.OPEN);
-        assertEquals(List.of(fill(1, 92, 1000)), t.fills());
-        assertEquals(10 * MS, t.events(Event.Trade.class).get(0).time());
+        t.clear().session(SessionState.HALTED);
+        assertEquals(List.of(new Event.Session(0, 0, SessionState.HALTED),
+                new Event.Cancelled(0, 10, CancelReason.HALTED, 1000)), t.events());
+        t.clear().advance(10 * MS).session(SessionState.OPEN);
+        assertEquals(List.of(), t.fills(), "nothing is left to run when it reopens");
     }
 
     @Test

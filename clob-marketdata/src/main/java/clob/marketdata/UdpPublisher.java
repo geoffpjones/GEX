@@ -11,8 +11,10 @@ import org.agrona.concurrent.UnsafeBuffer;
 
 /**
  * Unicast UDP delivery (confirmed acceptable for screened data, PLAN Q12): one datagram per update to the
- * subscriber's endpoint, with a per-subscription sequence number for gap detection. Unscreened data can
- * use the same format on a multicast group.
+ * subscriber's endpoint, with a per-subscription sequence number for gap detection. Every message is a
+ * complete snapshot of the levels, and a subscription made with a refresh interval re-sends it periodically,
+ * so a receiver recovers from any loss by the next update. The format is this project's own binary layout
+ * ({@link SnapshotCodec}), not FAST or ITCH. Unscreened data can use the same format on a multicast group.
  */
 public final class UdpPublisher implements MarketDataSink, AutoCloseable {
     private final DatagramChannel channel;
@@ -34,6 +36,11 @@ public final class UdpPublisher implements MarketDataSink, AutoCloseable {
     public synchronized void register(long subscriptionId, SocketAddress endpoint) {
         endpoints.put(subscriptionId, endpoint);
         sequences.put(subscriptionId, new long[1]);
+    }
+
+    public synchronized void unregister(long subscriptionId) {
+        endpoints.remove(subscriptionId);
+        sequences.remove(subscriptionId);
     }
 
     @Override

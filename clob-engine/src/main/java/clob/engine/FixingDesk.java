@@ -121,6 +121,10 @@ final class FixingDesk {
         OrderQueue opp = agg.side == Side.BUY ? s.sells : s.buys;
         for (Order p = opp.head; p != null && agg.leaves > 0; ) {
             Order next = p.next;
+            if (engine.credit.sameEntity(agg.accountId, p.accountId)) {
+                agg.selfTradeHit = true;
+                break;
+            }
             long qty = Math.min(agg.leaves, p.leaves);
             long cap = engine.credit.capacity(agg.accountId, p.accountId, instrument.id(), agg.side);
             if (cap < qty) {
@@ -134,12 +138,17 @@ final class FixingDesk {
         if (agg.residualCancelQty > 0) {
             long qty = agg.residualCancelQty;
             agg.residualCancelQty = 0;
-            engine.listener.onOrderCancelled(time, agg.orderId, CancelReason.RESIDUAL_BELOW_MIN_QTY, qty);
+            engine.listener.onOrderCancelled(time, agg.orderId, CancelReason.RESIDUAL_BELOW_MIN_QTY, qty, 0);
             engine.release(agg, time);
             return;
         }
         if (agg.leaves == 0) {
             engine.release(agg, time);
+            return;
+        }
+        if (agg.selfTradeHit) {
+            agg.selfTradeHit = false;
+            engine.terminate(agg, CancelReason.SELF_TRADE, time);
             return;
         }
         agg.prioritySeq = engine.nextPrioritySeq();
@@ -169,7 +178,7 @@ final class FixingDesk {
             passive.queue.remove(passive);
             long residual = passive.leaves;
             passive.leaves = 0;
-            engine.listener.onOrderCancelled(time, passive.orderId, CancelReason.RESIDUAL_BELOW_MIN_QTY, residual);
+            engine.listener.onOrderCancelled(time, passive.orderId, CancelReason.RESIDUAL_BELOW_MIN_QTY, residual, 0);
             engine.release(passive, time);
         }
     }
@@ -194,13 +203,16 @@ final class FixingDesk {
         }
     }
 
-    /** Prices pending matches at {@code rate}. False if nothing awaits a rate for this event and instrument. */
+    /**
+     * Prices pending matches at {@code rate}. False if nothing awaits a rate for this event and
+     * instrument, or if the fixing time has not been reached (an early rate is refused; the source resends).
+     */
     boolean rate(int eventId, int instrumentId, long rate, long time) {
         if (eventId < 0 || eventId >= open.length || instrumentId < 0 || instrumentId >= sessions.length || rate <= 0) {
             return false;
         }
         Session s = sessions[instrumentId][eventId];
-        if (s == null || !s.awaitingRate) {
+        if (s == null || !s.awaitingRate || time < fixingTime[eventId]) {
             return false;
         }
         for (int k = 0; k < s.pending; k++) {
@@ -211,6 +223,89 @@ final class FixingDesk {
         s.pending = 0;
         s.awaitingRate = false;
         return true;
+    }
+
+    interface OrderWriter {
+        void write(Order o, int instrumentId, int eventId) throws java.io.IOException;
+    }
+
+    void saveMeta(java.io.DataOutput out) throws java.io.IOException {
+        for (int e = 0; e < open.length; e++) {
+            out.writeLong(cutoff[e]);
+            out.writeLong(fixingTime[e]);
+            out.writeBoolean(open[e]);
+        }
+        int count = 0;
+        for (Session[] perInstrument : sessions) {
+            for (Session s : perInstrument) {
+                count += s == null ? 0 : 1;
+            }
+        }
+        out.writeInt(count);
+        for (int i = 0; i < sessions.length; i++) {
+            for (int e = 0; e < sessions[i].length; e++) {
+                Session s = sessions[i][e];
+                if (s == null) {
+                    continue;
+                }
+                out.writeInt(i);
+                out.writeInt(e);
+                out.writeBoolean(s.awaitingRate);
+                out.writeInt(s.pending);
+                for (int k = 0; k < s.pending; k++) {
+                    out.writeLong(s.matchIds[k]);
+                    out.writeLong(s.aggressorIds[k]);
+                    out.writeLong(s.passiveIds[k]);
+                    out.writeLong(s.qtys[k]);
+                    out.writeUTF(s.aggressorSides[k].name());
+                }
+            }
+        }
+    }
+
+    void forEachResting(OrderWriter writer) throws java.io.IOException {
+        for (int i = 0; i < sessions.length; i++) {
+            for (int e = 0; e < sessions[i].length; e++) {
+                Session s = sessions[i][e];
+                if (s == null) {
+                    continue;
+                }
+                for (Order o = s.buys.head; o != null; o = o.next) {
+                    writer.write(o, i, e);
+                }
+                for (Order o = s.sells.head; o != null; o = o.next) {
+                    writer.write(o, i, e);
+                }
+            }
+        }
+    }
+
+    void restoreMeta(java.io.DataInput in) throws java.io.IOException {
+        for (int e = 0; e < open.length; e++) {
+            cutoff[e] = in.readLong();
+            fixingTime[e] = in.readLong();
+            open[e] = in.readBoolean();
+        }
+        int count = in.readInt();
+        for (int n = 0; n < count; n++) {
+            int instrument = in.readInt();
+            int event = in.readInt();
+            Session s = session(instrument, event);
+            s.awaitingRate = in.readBoolean();
+            int pending = in.readInt();
+            for (int k = 0; k < pending; k++) {
+                long matchId = in.readLong();
+                long aggressor = in.readLong();
+                long passive = in.readLong();
+                long qty = in.readLong();
+                s.record(matchId, aggressor, passive, qty, Side.valueOf(in.readUTF()));
+            }
+        }
+    }
+
+    void restoreResting(Order o, int instrumentId, int eventId) {
+        Session s = session(instrumentId, eventId);
+        (o.side == Side.BUY ? s.buys : s.sells).add(o);
     }
 
     void collect(Predicate<Order> filter, ArrayList<Order> out) {

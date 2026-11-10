@@ -3,22 +3,24 @@ package clob.fix;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
-/** State of one FIX connection (acceptor side). Owned by the gateway thread. */
+/** One TCP connection (acceptor side). Owned by the gateway thread. Logical state lives in {@link LogicalSession}. */
 final class FixSession {
     final SocketChannel channel;
     final long connectedMillis;
     final ByteBuffer in = ByteBuffer.allocate(1 << 16);
     final ByteBuffer out = ByteBuffer.allocate(1 << 20);
 
+    LogicalSession logical;
     FixSessionConfig config;
     boolean loggedOn;
     boolean closing;
-    long expectedIn = 1;
-    long nextOut = 1;
+    /** Bytes received but not yet parsed, because the gateway had to stop reading. */
+    boolean unparsed;
+    /** Cancel-on-disconnect has been submitted for this connection (at shutdown, ahead of the close). */
+    boolean disconnectCancelSent;
     long heartbeatMillis = 30_000;
     long lastInMillis;
     long lastOutMillis;
@@ -26,16 +28,8 @@ final class FixSession {
     long testRequestSentMillis;
     boolean resendRequested;
 
-    /** Outbound application messages by sequence number, for ResendRequest: msgType + body fields. */
-    final ArrayList<String> sentTypes = new ArrayList<>();
-    final ArrayList<byte[]> sentBodies = new ArrayList<>();
-    final ArrayList<Long> sentMillis = new ArrayList<>();
-
     /** MDReqID → market data subscription id. */
     final Map<String, Long> mdRequests = new HashMap<>();
-
-    /** ClOrdID (orders and their cancel/replace requests) → engine order id. */
-    final Map<String, Long> clOrdIds = new HashMap<>();
 
     double tokens;
     long tokensAtMillis;
@@ -46,27 +40,6 @@ final class FixSession {
         this.lastInMillis = nowMillis;
         this.lastOutMillis = nowMillis;
         this.tokensAtMillis = nowMillis;
-    }
-
-    void resetSequences() {
-        expectedIn = 1;
-        nextOut = 1;
-        sentTypes.clear();
-        sentBodies.clear();
-        sentMillis.clear();
-        resendRequested = false;
-    }
-
-    /** Records an outbound message for possible resend (admin messages are recorded as null). */
-    void store(long seq, String msgType, byte[] body, long millis) {
-        while (sentTypes.size() < seq - 1) {
-            sentTypes.add(null);
-            sentBodies.add(null);
-            sentMillis.add(0L);
-        }
-        sentTypes.add(msgType);
-        sentBodies.add(body);
-        sentMillis.add(millis);
     }
 
     /** Token-bucket throttle. True if the message may proceed. */

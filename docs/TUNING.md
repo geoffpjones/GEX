@@ -9,13 +9,13 @@ Each latency-critical thread gets its own **isolated physical core**, pinned, wi
 | Thread | Agent | Notes |
 |---|---|---|
 | Sequencer | `Pipeline` sequencer agent | stamps, journals, forwards |
-| Engine | `Pipeline` engine agent | matching; never blocks or allocates |
+| Engine | `Pipeline` engine agent | matching does no I/O and allocates nothing in steady state, but its output waits if a mandatory consumer's ring is full (see the runbook) |
 | FIX gateway | `FixGateway` | NIO; one gateway per few hundred sessions |
 | Market data | `Pipeline` follower (`MarketDataService`) | screened builds can saturate it (see Phase 8 results) |
 
 Everything else (JIT and GC threads, logging, admin, the OS) runs on the remaining cores.
 
-The pipeline agents currently use `BackoffIdleStrategy`, which parks for up to 100 µs when idle. That suits a shared development box but adds tens to hundreds of µs per hop. **In production, use `BusySpinIdleStrategy` (or `NoOpIdleStrategy`) on isolated cores.** Making this configurable is a small change.
+Agents default to a backoff idle strategy, which parks for up to 100 µs when idle. That suits a shared development box but adds tens to hundreds of µs per hop. **In production set `node.idleStrategy=spin` on isolated cores.** `md.publishThreads` builds market data in parallel; each thread needs its own core.
 
 ## Operating system (Linux)
 
@@ -27,7 +27,7 @@ The pipeline agents currently use `BackoffIdleStrategy`, which parks for up to 1
 - **IRQ affinity:** steer NIC and disk interrupts away from pinned cores (`irqbalance` off, set `/proc/irq/*/smp_affinity`).
 - **Memory:** transparent huge pages set to `madvise`, with `-XX:+UseTransparentHugePages` or explicit huge pages; swap off; `vm.zone_reclaim_mode=0`; NUMA-local memory (`numactl --cpunodebind --membind`).
 - **Network:** `SO_BUSY_POLL` or kernel bypass (Solarflare Onload, or VMA) for FIX and UDP market data; `tcp_nodelay` is already set; larger socket buffers for market data.
-- **Journal disk:** NVMe with XFS, on its own device. With Aeron Archive (Phase 10) the journal is replicated, and fsync per batch becomes a choice (Q40).
+- **Journal disk:** NVMe with XFS, on its own device. The node forces the journal every `journal.flushMillis`; see the runbook for what that bounds.
 
 ## JVM
 
@@ -51,5 +51,6 @@ The pipeline agents currently use `BackoffIdleStrategy`, which parks for up to 1
 | `org.openjdk.jmh.Main EngineBenchmarks` | add/cancel, sweep, crossed-book walk, peg tick |
 | `MarketDataBench` | screened market data cycle cost vs subscribers and churn |
 | `clob.fix.FixLatencyBench` | FIX in → execution report out, paced and CO-corrected |
+| `CapacityHarness` (`./gradlew :clob-bench:capacity --args="..."`) | the whole node at a target rate: consumer lag, cycle time, overruns, delivery, heap |
 
 Acceptance should be measured on production-class hardware with the settings above, at the agreed peak (Q11, Q19, Q42).

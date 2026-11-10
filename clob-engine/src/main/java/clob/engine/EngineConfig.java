@@ -2,7 +2,8 @@ package clob.engine;
 
 /**
  * Pre-sizing for pools and tables (pools grow past these sizes only above the high-water mark), and
- * the seed for race lotteries. The seed is part of the journalled configuration, so replay is exact.
+ * the seed for race lotteries. The node records seed and capacities in the journal manifest and
+ * refuses to replay a journal under different ones.
  */
 public record EngineConfig(int initialOrders, int maxLiveOrders, int initialLevels, int initialLevelsPerSide,
         int initialTimers, long randomSeed) {

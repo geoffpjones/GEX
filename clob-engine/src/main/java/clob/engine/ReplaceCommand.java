@@ -6,6 +6,8 @@ package clob.engine;
  */
 public final class ReplaceCommand {
     public long orderId;
+    /** Correlates this request with its outcome. 0 means uncorrelated. */
+    public long requestId;
     public int userId;
     public long price;
     public long qty;
@@ -14,6 +16,7 @@ public final class ReplaceCommand {
 
     public ReplaceCommand reset() {
         orderId = 0;
+        requestId = 0;
         userId = 0;
         price = 0;
         qty = 0;

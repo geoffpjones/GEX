@@ -30,7 +30,8 @@ import org.agrona.concurrent.UnsafeBuffer;
  * engine input, so it is journalled, replicated and replayed like any order.
  *
  * <pre>
- * GET  /health                       role and last sequence (no token)
+ * GET  /health                       liveness: 200 while working, 503 once failed (no token)
+ * GET  /ready                        readiness: 200 only when serving and every consumer is keeping up (no token)
  * GET  /metrics                      Prometheus text (no token)
  * POST /admin/session?instrument=-1&amp;state=HALTED|OPEN|CLOSED|PRE_OPEN
  * POST /admin/killswitch             halt every instrument, then cancel every order
@@ -43,6 +44,7 @@ import org.agrona.concurrent.UnsafeBuffer;
  * POST /admin/roll?today=2026-11-10
  * POST /admin/fixing/schedule?event=&amp;date=2026-11-10   (cut-off and fixing instants from the event's zone)
  * POST /admin/fixing/rate?event=&amp;instrument=&amp;rate=1.08123
+ * POST /admin/snapshot               write a snapshot at the journal's end, in the background
  * POST /admin/promote                (standby only)
  * </pre>
  *
@@ -62,18 +64,20 @@ final class AdminHttp implements AutoCloseable {
     private final Metrics metrics;
 
     AdminHttp(NodeConfig cfg, RefData refData, Submitter submitter, Metrics metrics, Supplier<String> health,
-            Runnable promote) throws IOException {
+            java.util.function.BooleanSupplier live, java.util.function.BooleanSupplier ready, Runnable promote,
+            Runnable snapshot) throws IOException {
         this.cfg = cfg;
         this.refData = refData;
         this.submitter = submitter;
         this.metrics = metrics;
-        server = HttpServer.create(new InetSocketAddress("127.0.0.1", cfg.adminPort()), 0);
+        server = HttpServer.create(new InetSocketAddress(cfg.adminBindHost(), cfg.adminPort()), 0);
         server.setExecutor(Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "clob-admin-http");
             t.setDaemon(true);
             return t;
         }));
-        server.createContext("/health", ex -> respond(ex, 200, health.get()));
+        server.createContext("/health", ex -> respond(ex, live.getAsBoolean() ? 200 : 503, health.get()));
+        server.createContext("/ready", ex -> respond(ex, ready.getAsBoolean() ? 200 : 503, health.get()));
         server.createContext("/metrics", ex -> respond(ex, 200, metrics.render()));
         server.createContext("/admin/", ex -> {
             try {
@@ -95,6 +99,15 @@ final class AdminHttp implements AutoCloseable {
                     new Thread(promote, "clob-promote").start();
                     return;
                 }
+                if (path.equals("/admin/snapshot")) {
+                    if (snapshot == null) {
+                        respond(ex, 409, "primary only");
+                        return;
+                    }
+                    snapshot.run();
+                    respond(ex, 202, "snapshot started");
+                    return;
+                }
                 if (submitter == null) {
                     respond(ex, 409, "standby: admin actions go to the primary");
                     return;
@@ -102,6 +115,8 @@ final class AdminHttp implements AutoCloseable {
                 handle(path, query(ex));
                 metrics.inc("clob_admin_requests_total", 1);
                 respond(ex, 202, "submitted");
+            } catch (IllegalStateException e) {
+                respond(ex, 503, "not accepting: " + e.getMessage());
             } catch (IllegalArgumentException | NullPointerException | java.time.DateTimeException e) {
                 respond(ex, 400, "bad request: " + e.getMessage());
             }
@@ -131,9 +146,14 @@ final class AdminHttp implements AutoCloseable {
             case "/admin/credit/relationship" -> submit(b, InputCodec.creditRelationship(b, 0, Integer.parseInt(q.get("from")),
                     Integer.parseInt(q.get("to")), intOr(q, "instrument", -1), Integer.parseInt(q.get("line"))));
             case "/admin/usdrate" -> submit(b, InputCodec.usdRate(b, 0, q.get("ccy"), Prices.toTicks(q.get("rate"), 8)));
-            case "/admin/valuedates" -> submit(b, InputCodec.valueDates(b, 0, Integer.parseInt(q.get("instrument")),
-                    (int) LocalDate.parse(q.get("near")).toEpochDay(),
-                    q.containsKey("far") ? (int) LocalDate.parse(q.get("far")).toEpochDay() : -1));
+            case "/admin/valuedates" -> {
+                int instrument = Integer.parseInt(q.get("instrument"));
+                if (refData.instrument(instrument) == null) {
+                    throw new IllegalArgumentException("unknown instrument " + instrument);
+                }
+                submit(b, InputCodec.valueDates(b, 0, instrument, (int) LocalDate.parse(q.get("near")).toEpochDay(),
+                        q.containsKey("far") ? (int) LocalDate.parse(q.get("far")).toEpochDay() : -1));
+            }
             case "/admin/roll" -> submit(b, InputCodec.valueDateRoll(b, 0, (int) LocalDate.parse(q.get("today")).toEpochDay()));
             case "/admin/fixing/schedule" -> {
                 FixingEvent event = refData.fixingEvent(Integer.parseInt(q.get("event")));
@@ -156,7 +176,11 @@ final class AdminHttp implements AutoCloseable {
     }
 
     private void submit(UnsafeBuffer b, int length) {
+        long deadline = System.nanoTime() + 2_000_000_000L;
         while (!submitter.submit(b, 0, length)) {
+            if (System.nanoTime() - deadline > 0) {
+                throw new IllegalStateException("the sequencer is not accepting input");
+            }
             Thread.onSpinWait();
         }
     }

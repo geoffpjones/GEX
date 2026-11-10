@@ -52,6 +52,7 @@ public final class MarketDataBench {
         Random r = new Random(1);
         for (int b = 0; b < books; b++) {
             feed(md, buf, stamp, InputCodec.usdRate(buf, 0, "C" + b, CreditEngine.RATE_SCALE));
+            feed(md, buf, stamp, InputCodec.valueDates(buf, 0, b, 20_000, -1));
         }
         for (int a = 1; a <= accounts; a++) {
             feed(md, buf, stamp, InputCodec.creditLine(buf, 0, a, a, CreditType.UNLIMITED, 0));

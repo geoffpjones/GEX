@@ -26,7 +26,12 @@ public final class OrderBook {
     /** Running taker race per aggressor side (indexed by {@code Side.ordinal()}). */
     final RaceManager.Race[] takerRaces = new RaceManager.Race[2];
     final java.util.ArrayList<RaceManager.Race> makerRaces = new java.util.ArrayList<>(256);
+    /** The operator-set state. See {@link #session()} for what actually applies. */
     SessionState session = SessionState.OPEN;
+    /** A USD rate or value date this instrument needs is missing. Kept apart so data arriving cannot undo an admin halt. */
+    boolean dataHalted;
+    /** Orders collected during pre-open, drawn in one lottery at the open. */
+    RaceManager.Race preOpenRace;
 
     /**
      * Bumped by every input or timer that may change this book. Over-approximate (a rejected order bumps
@@ -38,12 +43,17 @@ public final class OrderBook {
         return version;
     }
 
+    /** The state in force: the operator's, except that missing data halts a pre-open or open book. */
     public SessionState session() {
-        return session;
+        return dataHalted && (session == SessionState.OPEN || session == SessionState.PRE_OPEN) ? SessionState.HALTED : session;
     }
 
     boolean isOpen() {
-        return session == SessionState.OPEN;
+        return session() == SessionState.OPEN;
+    }
+
+    boolean isPreOpen() {
+        return session() == SessionState.PRE_OPEN;
     }
 
     /** Orders whose queued request waits for the taker races to finish. */

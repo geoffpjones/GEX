@@ -2,12 +2,130 @@
 
 Source: `requirements.md`. This plan covers the architecture, the build phases, the testing approach, and the questions the spec leaves open.
 
+**Revision 6 (2026-11-08).** Adds the next-stage plan below, combining the Q&A answers with `review.md`. Read that section first for current priorities.
+
 **Revision 5 (2026-11-07).** Consistency pass:
 - Fixed stale references: the VISIBILITY rule is now "exhaustion", not "reachability"; NDF settlement currency is deferred to Q10a; Q7c moved into the Phase 2 gate; the race risk now cites the open questions rather than answered ones.
 - Added Q20–Q26.
 - **Note (updated 2026-11-08):** the answers marked "confirmed" in Revision 4 have now been folded into `requirements.md` (Q26).
 
 **Revision 4 (2026-11-07).** Review update: adds explicit decision gates for matching, product economics and credit; specifies sequenced market-data boundaries and race admission rules; and corrects acceptance tests. Previous revision history: Revision 3 (2026-11-07). Revision 2 built in the answers to Q1–Q6, plus partial answers to Q7, Q8 and Q11. Revision 3 adds the latest requirements changes: the corrected visibility line (Q1a/Q1b), partial fills on credit breach (Q6a), pegs excluded from the peg reference (Q13), the `reject-on-ttl` flag (Q14), and fixing cut-off times (Q5). Each answered question in **§6** keeps a short record of the answer, plus any follow-ups the answer raised. The skeleton and throughput experiments can proceed. Production matching implementation is gated on **Q1c, Q6i, Q14a and Q15**; credit and product decisions have separate gates below. Examples validate outcomes but do not establish a complete algorithm.
+
+---
+
+## Next stage: from prototype to production candidate (planned 2026-11-08)
+
+**Where we are.** All phases have a working first version, but `review.md` found 13 P1 issues and the system is not ready for production acceptance. The Q&A also changed agreed behaviour (see "Resolved in Q&A" in §6). This stage fixes the defects, builds the agreed behaviour, and proves recovery and capacity.
+
+**Scope.** SPOT only until Q10a closes. SWAP and NDF stay disabled in deployed reference data, because trade events don't yet carry their legs or settlement terms. Sizes are relative (S, M, L), and each milestone is done only when its exit test passes.
+
+**Status (2026-11-08).** M0–M6 are built and their automated exit tests pass (`docs/TRACEABILITY.md`). The user agreed D1, D1a and D5; D2, D3, D4, D6, D7 and D9 use the recommended defaults (`requirements.md` §13). M7 is only partly done: the harness exists, and the development-host numbers are in `clob-bench/SPIKE-RESULTS.md`, but its exit cannot be met until D8's numbers exist and the run happens on target hardware. Also outstanding: a CI run on GitHub, a two-host failover, a power-loss test and a day-long soak.
+
+### Order of work
+
+| # | Milestone | Size | Covers | Needs first |
+|---|---|---|---|---|
+| M0 | Baseline | S | CI, permanent tests from the review probes, requirement IDs | – |
+| M1 | Trading invariants | M | R05, R06, R07, R10, R14 | M0, D1, D1a, D5 |
+| M2 | Journal format v2 and order identity | L | R01, R02, R03, R08, R17, Q30 | M1, D2 |
+| M3 | Agreed behaviour changes | L | Q&A code changes, R20 | M2, D3, D4, D6 |
+| M4 | Liveness and lifecycle | M | R04, R11, R13, R16, R19 | M2 |
+| M5 | Recovery and HA | L | R09, R12, Q39, Q40, Q44 | M3, M4, D7 |
+| M6 | Market data and transports | L | R15, R18, Q6e, Q42 | M3, D8, D9 |
+| M7 | Capacity acceptance | M | Full node on target hardware, day-long soak | M4–M6, D8 |
+
+This follows the review's recommended order with one change: binding replay to versioned configuration (R08) moves up into M2. Request ids, session identity and schema versioning all change the journal format, so they should change it once. No production journals exist, so v2 needs no migration from today's format.
+
+M3 and M4 touch different code (engine versus pipeline and node) and can overlap.
+
+### Decisions needed
+
+| # | Decision | Recommended | Blocks |
+|---|---|---|---|
+| D1 | A DAY or GTT order reaches expiry while waiting in a race (the unanswered Q&A round). | It expires on time and leaves its ticket. M1 assumes this. | M1 |
+| D1a | After a SWAP's near leg settles, the far leg remains as NOP exposure, though the SWAP took no NOP at entry (Q6b). A roll can therefore put a line over its limit with no trade. | Accept. The line becomes reducing-only (Q6h) and ops is alerted. | M1 |
+| D2 | FIX session persistence and credentials (Q41). | Sequence numbers and resend store survive restart; hashed credentials; TLS terminated by a proxy in v1. | M2 |
+| D3 | Does a stale rate count as "missing" for the instrument halt? | No. Missing means never received or invalid; staleness raises an alert. | M3 |
+| D4 | Which order types does pre-open accept? | Limit and iceberg. Pegs and mid have no reference before the open, and market orders can't wait. | M3 |
+| D5 | Early fixing rate, before the fixing time (R14). | Refuse it deterministically; the adapter resends at fixing time. | M1 |
+| D6 | Remaining small defaults: requirements §13, Q25 and Q17. | Accept as built. | M3 |
+| D7 | Durability and failover (Q39, Q40, Q43, Q44). | Manual failover; asynchronous replication with a stated data-loss bound; periodic flush; snapshot at each end of day. | M5 |
+| D8 | Performance and delivery envelope (Q11, Q19, Q42), including overload policy. | Needs business numbers. | M6, M7 |
+| D9 | Transports (Q12). | FIX over TCP and binary unicast UDP in v1; FAST and ITCH later. | M6 |
+| D10 | SWAP and NDF economics (Q10, Q10a). | Needs business input. | SWAP/NDF track |
+
+### Milestones
+
+**M0: Baseline.**
+- Add a CI workflow that runs tests from clean, and ignore `var/`.
+- Convert the nine review probes into permanent tests asserting the corrected behaviour. Each is disabled until its fix lands.
+- Give requirements stable IDs and start a requirement-to-test matrix.
+- Exit: CI is green, and every requirement and R-finding is mapped to a test or a milestone.
+
+**M1: Trading invariants.**
+- R05: GTT and DAY expiry applies while an order waits in a race, with a defensive expiry check at lottery application.
+- R06: required dates are validated before any limited-credit evaluation. The M3 halt then sits on top of this guard.
+- R07: record gross usage only for DSL lines, preflight every bilateral and leg update before mutating, and define bounds on accumulated state.
+- R10: domain APIs validate before mutating and return typed refusals. This includes `setRelationship`, which bumps its version before validating.
+- R14: enforce the fixing time (D5).
+- Exit: the five engine and credit probes pass in corrected form, including failure atomicity with uneven pool histories.
+
+**M2: Journal format v2 and order identity.**
+- R08: a manifest of schema, refdata, seed and capacity, verified before replay and replication. Stable wire IDs replace Java ordinals.
+- R03: a request id carried through input, pending engine state and output. ClOrdIDs are unique across all application requests (Q30).
+- R01: order ids come from a durable sequence, restored before accepting traffic and after promotion.
+- R02: logical session and order ownership are separate from the socket and rebuilt from the journal, including fixing matches awaiting a rate.
+- R17: inbound parser bounds, and failures contained to the offending connection.
+- Extract session storage and request correlation from `FixGateway` as part of this work.
+- Exit: real FIX tests through reconnect, restart and promotion with live GTC orders, queued requests and pending fixing matches. Mismatched seed, refdata or schema fails startup.
+
+**M3: Agreed behaviour changes.** In this order, smallest and most independent first:
+1. Q7c: market orders are IOC or FOK only. R20: the loader exposes allowed order types and TIFs.
+2. Q7b: holds per side being taken. Today `latestTakerRaceId` covers both sides.
+3. Legal entities in reference data and in the manifest, then entity-owned pools (Q6g).
+4. Q29: self-trade check before the credit check, in both the matching walk and `FillSimulator`, with a new cancel reason and FIX mapping.
+5. Q28: a hidden order trades with newly displayed quantity. The planned trigger is any event that newly displays quantity: new order, amend, lottery application, iceberg refresh, peg reprice. The newly resting order counts as the aggressor for Q29. `VisibilityPriorityTest` line 74 asserts today's locked book and must change.
+6. Q37: an amend that creates a new level enters a maker race. This relies on M2's request ids.
+7. Q38: a halt cancels waiting race orders and releases any holds tied to those races, replacing the deferred-resolve path.
+8. Missing-data halt with auto-resume. This uses a separate flag, so arriving data can never reopen an admin halt. It cancels race orders like any other halt.
+9. Pre-open collection and the per-book lottery at the open. Pre-size for a large open, and measure the burst.
+10. Q24: a 17:00 New York end-of-day schedule.
+- Exit: scenario tests for each item; FOK/IOC equivalence, determinism and zero-allocation tests still pass, with the allocation guard extended to fixing orders; benchmarks re-run.
+
+**M4: Liveness and lifecycle.**
+- R04: gateway submission becomes non-blocking, so no circular wait is possible.
+- Document every ring's owner, bound, ordering, overload action and failure effect, and decide which consumers are critical.
+- R11: staged shutdown with a watermark-based drain to replace `Pipeline.drain()`.
+- R13: node state machine, fatal-error propagation, and separate liveness and readiness. Node construction rolls back on failure.
+- R16: retention and end-of-day rollover for gateway state and long-dated timers.
+- R19: valid Prometheus output, plus watermarks, lag and queue occupancy.
+- Exit: sustained two-way traffic makes progress on tiny rings; a SIGTERM test with queued work and active sessions; an agent failure makes the node not ready.
+
+**M5: Recovery and HA.**
+- R09: separate a torn tail from corruption, and validate segment identity and sequence continuity.
+- D7's flush policy, including forcing a segment at rollover.
+- Snapshots, built only now that the state contract has settled.
+- R12: explicit listen addresses, non-blocking replication with deadlines, and sequence-indexed catch-up.
+- Exit: abrupt process kill, corruption before a valid suffix, a non-reading standby, and a failover between two hosts. Power loss is tested separately on real storage.
+
+**M6: Market data and transports.**
+- R15: validate instrument intervals against the global tick.
+- Q6e: headroom-aware screening. The replica already holds credit usage, so the new work is the calculation: quantity shown must reflect headroom shared across a counterparty's orders, and it differs by side. Far fewer subscribers will share a view, which makes the over-budget worst case harder.
+- Multi-threaded publishing from a frozen per-cycle state (Q42).
+- R18: wire UDP into the node with subscription management and a refresh path.
+- Measure tick lateness, follower lag, full-cycle time and arrival at the receiver.
+- Exit: the D8 envelope is met at receivers.
+
+**M7: Capacity acceptance.**
+- Run the complete node with all consumers on target hardware, with configurable busy-spin idle strategies.
+- Include adversarial depth, account, race and timer limits, and a day-long heap and GC soak.
+- Do the remaining tuning only if the numbers require it: slimming `Order`, separate race-expiry inputs.
+- Exit: results meet D8 and are recorded in `SPIKE-RESULTS.md`.
+
+**Parallel and later.**
+- Review P3 items (formatter, static analysis, codec schema, type and unit naming, doc corrections) follow once the affected boundaries have regression coverage. No cosmetic rewrite is mixed with correctness fixes.
+- SWAP and NDF follow D10.
+- Aeron Cluster is only needed if D7 rejects manual failover.
 
 ---
 
@@ -618,7 +736,7 @@ Status key: ✅ answered · 🟡 partly answered, follow-ups listed · ❓ open.
 - Q7b: hold only requests on the side being taken. Today requests are held book-wide for a race on either side.
 - Q37: amends that create a new level start a maker race. Today only new orders do.
 - Q38: a halt cancels race-waiting orders (today they resolve at reopen). Add a pre-open phase that accepts orders and applies them by lottery at the open (today rejected).
-- Q6e: headroom-aware screening. Needs credit usage in the market data replica, and will weaken view sharing, so the over-budget worst case (Q42) gets harder.
+- Q6e: headroom-aware screening. The market data replica already holds credit usage; the new work is calculating shown quantity per subscriber. It will weaken view sharing, so the over-budget worst case (Q42) gets harder.
 - Q24: an end-of-day schedule at 17:00 New York. Today end of day needs an admin input.
 - Missing data: halt the instrument and auto-resume on arrival. Today DSL and NOP lines are blocked and unlimited lines still trade.
 

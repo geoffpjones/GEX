@@ -6,7 +6,6 @@ import static clob.credit.CreditEngine.RATE_SCALE;
 import static clob.credit.CreditEngine.UNLIMITED_CAPACITY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import clob.common.Side;
@@ -92,7 +91,7 @@ class CreditEngineTest {
         assertEquals(4_400_000L * RATE_SCALE, c.dslUsageE8(1, TODAY));
         c.setValueDates(EURUSD, TODAY + 1, -1);
         assertEquals(10_000_000L, c.capacity(1, 2, EURUSD, Side.BUY), "a new value date has its own limit");
-        c.rollValueDate(TODAY + 1);
+        c.rollValueDate(TODAY + 1, (l, u, m) -> { });
         assertEquals(0, c.dslUsageE8(1, TODAY), "settled date released");
     }
 
@@ -127,7 +126,7 @@ class CreditEngineTest {
     void swapConsumesDslOnBothLegsButNetsForNop() {
         c.setLine(1, 1, CreditType.DSL, 3_300_000L);
         c.setRelationship(1, 2, ALL_INSTRUMENTS, 1);
-        c.setLine(2, 2, CreditType.NOP, 1L);
+        c.setLine(2, 2, CreditType.NOP, 1_000_000L);
         c.setRelationship(2, 1, ALL_INSTRUMENTS, 2);
         assertEquals(3_000_000L, c.capacity(1, 2, EURUSD_1M, Side.BUY), "NOP does not bind: legs net to zero");
         c.commit(1, 2, EURUSD_1M, Side.BUY, 2_000_000L);
@@ -157,8 +156,8 @@ class CreditEngineTest {
     @Test
     void lineBelongsToItsGiver() {
         c.setLine(1, 1, CreditType.UNLIMITED, 0);
-        assertThrows(IllegalArgumentException.class, () -> c.setRelationship(2, 1, ALL_INSTRUMENTS, 1));
-        assertThrows(IllegalArgumentException.class, () -> c.setLine(1, 2, CreditType.DSL, 5));
+        assertEquals(CreditRefusal.LINE_OWNED_BY_ANOTHER_ENTITY, c.setRelationship(2, 1, ALL_INSTRUMENTS, 1));
+        assertEquals(CreditRefusal.LINE_OWNED_BY_ANOTHER_ENTITY, c.setLine(1, 2, CreditType.DSL, 5));
         c.setRelationship(1, 2, ALL_INSTRUMENTS, 1);
         c.setRelationship(1, 3, ALL_INSTRUMENTS, 1); // one giver, many counterparties: allowed
     }
@@ -189,10 +188,10 @@ class CreditEngineTest {
 
     @Test
     void validatesInputs() {
-        assertThrows(IllegalArgumentException.class, () -> c.setLine(1, 1, CreditType.DSL, CreditEngine.MAX_LIMIT_USD + 1));
-        assertThrows(IllegalArgumentException.class, () -> c.setUsdRate("JPY", RATE_SCALE));
-        assertThrows(IllegalArgumentException.class, () -> c.setUsdRate("EUR", 0));
-        assertThrows(IllegalArgumentException.class, () -> c.setRelationship(1, 2, ALL_INSTRUMENTS, 99));
-        assertThrows(IllegalArgumentException.class, () -> c.setRelationship(0, 2, ALL_INSTRUMENTS, NO_LINE));
+        assertEquals(CreditRefusal.INVALID_LIMIT, c.setLine(1, 1, CreditType.DSL, CreditEngine.MAX_LIMIT_USD + 1));
+        assertEquals(CreditRefusal.UNKNOWN_CURRENCY, c.setUsdRate("JPY", RATE_SCALE));
+        assertEquals(CreditRefusal.INVALID_RATE, c.setUsdRate("EUR", 0));
+        assertEquals(CreditRefusal.UNKNOWN_LINE, c.setRelationship(1, 2, ALL_INSTRUMENTS, 99));
+        assertEquals(CreditRefusal.UNKNOWN_ACCOUNT, c.setRelationship(0, 2, ALL_INSTRUMENTS, NO_LINE));
     }
 }

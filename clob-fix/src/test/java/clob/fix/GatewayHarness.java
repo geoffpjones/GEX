@@ -31,17 +31,24 @@ final class GatewayHarness implements AutoCloseable {
     private final AgentRunner runner;
 
     GatewayHarness(Path dir, List<FixSessionConfig> sessions) throws Exception {
+        this(dir, sessions, 1 << 16, 1 << 20);
+    }
+
+    /** {@code inboundRing} and {@code outputRing} are the bounded queues in bytes (tiny in overload tests). */
+    GatewayHarness(Path dir, List<FixSessionConfig> sessions, int inboundRing, int outputRing) throws Exception {
         RefData.Builder b = RefData.builder().add(Instrument.builder(0, "EUR/USD", "SPOT").pricePrecision(5)
-                .priceIncrement(1).minQty(1000).qtyIncrement(1000).maxQty(10_000_000).minTtlNanos(0).build());
+                .priceIncrement(1).minQty(1000).qtyIncrement(1000).maxQty(10_000_000).minTtlNanos(0).build())
+                .add(Instrument.builder(1, "EUR/USD", "TTL").pricePrecision(5).priceIncrement(1).minQty(1000)
+                        .qtyIncrement(1000).maxQty(10_000_000).minTtlNanos(150_000_000L).build());
         for (int u = 1; u <= 3; u++) {
             b.entitle(u, u);
         }
         refData = b.build();
-        OutputRing out = new OutputRing(1 << 20);
+        OutputRing out = new OutputRing(outputRing);
         MatchingEngine engine = new MatchingEngine(refData, EngineConfig.defaults(), new CreditEngine(8, refData),
                 new OutputEncoder(out));
         journal = Journal.open(dir, 1 << 20);
-        pipeline = new Pipeline(engine, journal, Clock.system(), (s, t, ty, r) -> { }, 0, 0, 1 << 16);
+        pipeline = new Pipeline(engine, journal, Clock.system(), (s, t, ty, r) -> { }, 0, 0, inboundRing);
         marketData = new clob.marketdata.MarketDataService(refData, EngineConfig.defaults(), 8);
         pipeline.addFollower(marketData);
         pipeline.enableMarketDataTicks(5_000_000L);
@@ -49,6 +56,7 @@ final class GatewayHarness implements AutoCloseable {
         UnsafeBuffer cmd = new UnsafeBuffer(ByteBuffer.allocateDirect(InputCodec.MAX_LENGTH));
         pipeline.submit(cmd, 0, InputCodec.usdRate(cmd, 0, "EUR", CreditEngine.RATE_SCALE));
         pipeline.submit(cmd, 0, InputCodec.valueDates(cmd, 0, 0, 20_000, -1));
+        pipeline.submit(cmd, 0, InputCodec.valueDates(cmd, 0, 1, 20_000, -1));
         for (int a = 1; a <= 3; a++) {
             pipeline.submit(cmd, 0, InputCodec.creditLine(cmd, 0, a, a, CreditType.UNLIMITED, 0));
             for (int c = 1; c <= 3; c++) {

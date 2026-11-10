@@ -33,6 +33,11 @@ public final class OutputReader {
     public long seed;
     public int sessionState;
     public int fixingEventId;
+    /** The cancel or replace request this event answers; 0 if none. */
+    public long requestId;
+    public int lineId;
+    public long usageE8;
+    public long limitE8;
 
     private DirectBuffer b;
     private int p;
@@ -82,22 +87,26 @@ public final class OutputReader {
                 orderId = i64();
                 reason = i8();
                 qty = i64();
+                requestId = i64();
             }
             case OutputEncoder.REPLACED -> {
                 orderId = i64();
                 price = i64();
                 qty = i64();
                 leaves = i64();
+                requestId = i64();
             }
             case OutputEncoder.REQUEST_REJECTED -> {
                 orderId = i64();
                 requestType = i8();
                 reason = i8();
+                requestId = i64();
             }
             case OutputEncoder.REQUEST_QUEUED -> {
                 orderId = i64();
                 requestType = i8();
                 releaseTime = i64();
+                requestId = i64();
             }
             case OutputEncoder.REPRICED -> {
                 orderId = i64();
@@ -130,6 +139,12 @@ public final class OutputReader {
             case OutputEncoder.SESSION_STATE -> {
                 instrumentId = i32();
                 sessionState = i8();
+            }
+            case OutputEncoder.END_OF_DAY -> { }
+            case OutputEncoder.CREDIT_LIMIT_BREACHED -> {
+                lineId = i32();
+                usageE8 = i64();
+                limitE8 = i64();
             }
             default -> throw new IllegalArgumentException("Unknown output type " + type);
         }

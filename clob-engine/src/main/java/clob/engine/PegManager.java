@@ -133,6 +133,7 @@ final class PegManager {
                 o.price = price;
                 engine.listener.onOrderRepriced(time, o.orderId, price);
                 engine.processBook(o, book, time);
+                engine.sweepNewlyDisplayed(time);
             }
         }
         ensureTick(book, time);

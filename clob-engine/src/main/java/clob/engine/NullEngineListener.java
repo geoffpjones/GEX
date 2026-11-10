@@ -12,10 +12,10 @@ public final class NullEngineListener implements EngineListener {
     @Override public void onOrderRejected(long time, long orderId, RejectReason reason) { }
     @Override public void onTrade(long time, long tradeId, int instrumentId, long aggressorOrderId, long passiveOrderId,
             Side aggressorSide, long price, int priceDecimals, long qty, long aggressorLeaves, long passiveLeaves) { }
-    @Override public void onOrderCancelled(long time, long orderId, CancelReason reason, long cancelledQty) { }
-    @Override public void onOrderReplaced(long time, long orderId, long price, long qty, long leaves) { }
-    @Override public void onRequestRejected(long time, long orderId, RequestType type, RequestRejectReason reason) { }
-    @Override public void onRequestQueued(long time, long orderId, RequestType type, long releaseTime) { }
+    @Override public void onOrderCancelled(long time, long orderId, CancelReason reason, long cancelledQty, long requestId) { }
+    @Override public void onOrderReplaced(long time, long orderId, long price, long qty, long leaves, long requestId) { }
+    @Override public void onRequestRejected(long time, long orderId, RequestType type, RequestRejectReason reason, long requestId) { }
+    @Override public void onRequestQueued(long time, long orderId, RequestType type, long releaseTime, long requestId) { }
     @Override public void onRaceStarted(long time, long raceId, int instrumentId, boolean taker, Side side, long price,
             long expiry, long seed) { }
     @Override public void onOrderJoinedRace(long time, long orderId, long raceId) { }

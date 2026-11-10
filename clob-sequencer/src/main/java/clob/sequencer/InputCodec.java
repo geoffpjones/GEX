@@ -27,8 +27,12 @@ import org.agrona.MutableDirectBuffer;
  *  24  body
  * </pre>
  *
- * Enums are their ordinal as a byte; null is -1. Gateways encode with sequence and time 0; the
- * sequencer stamps them in place.
+ * Enums are their stable wire id as a byte ({@link Wire}); null is -1. Gateways encode with sequence
+ * and time 0; the sequencer stamps them in place.
+ *
+ * <p>New orders, cancels and replaces from a FIX gateway end with an identity trailer the engine
+ * ignores: {@code byte compIdLength, compId, byte clOrdIdLength, clOrdId, byte ordType}. Journalling it
+ * lets recovery rebuild which logical session owns each order and request.
  */
 public final class InputCodec {
     public static final ByteOrder ORDER = ByteOrder.LITTLE_ENDIAN;
@@ -37,7 +41,9 @@ public final class InputCodec {
     public static final int SEQUENCE = 8;
     public static final int TIME = 16;
     public static final int HEADER = 24;
-    public static final int MAX_LENGTH = 128;
+    public static final int MAX_LENGTH = 256;
+    /** Longest ClOrdID or SenderCompID journalled with a request. */
+    public static final int MAX_ID_LENGTH = 64;
 
     public static final int NEW_ORDER = 1;
     public static final int CANCEL = 2;
@@ -92,12 +98,62 @@ public final class InputCodec {
         return length;
     }
 
-    static byte ord(Enum<?> e) {
-        return e == null ? -1 : (byte) e.ordinal();
+    /**
+     * Appends the identity trailer to an encoded message and returns the new length. {@code ordType} is
+     * the FIX OrdType as sent (0 for cancels and replaces).
+     */
+    public static int withIdentity(MutableDirectBuffer b, int o, int length, byte[] compId, byte[] clOrdId, byte ordType) {
+        if (compId.length > MAX_ID_LENGTH || clOrdId.length > MAX_ID_LENGTH) {
+            throw new IllegalArgumentException("identifier longer than " + MAX_ID_LENGTH);
+        }
+        int p = o + length;
+        b.putByte(p++, (byte) compId.length);
+        b.putBytes(p, compId);
+        p += compId.length;
+        b.putByte(p++, (byte) clOrdId.length);
+        b.putBytes(p, clOrdId);
+        p += clOrdId.length;
+        b.putByte(p++, ordType);
+        int total = p - o;
+        b.putInt(o + LENGTH, total, ORDER);
+        return total;
     }
 
-    static <E extends Enum<E>> E enumOf(E[] values, byte b) {
-        return b < 0 ? null : values[b];
+    /** Body length of a message type without its identity trailer, or -1 if it cannot carry one. */
+    private static int bodyLength(int type) {
+        return switch (type) {
+            case NEW_ORDER -> 68;
+            case CANCEL -> 21;
+            case REPLACE -> 52;
+            default -> -1;
+        };
+    }
+
+    /** Offset of the identity trailer, or -1 if the message has none. */
+    public static int identityOffset(DirectBuffer b, int o) {
+        int body = bodyLength(type(b, o));
+        return body < 0 || length(b, o) <= HEADER + body ? -1 : o + HEADER + body;
+    }
+
+    public static String identityCompId(DirectBuffer b, int at) {
+        return ascii(b, at + 1, b.getByte(at));
+    }
+
+    public static String identityClOrdId(DirectBuffer b, int at) {
+        int comp = b.getByte(at);
+        return ascii(b, at + 2 + comp, b.getByte(at + 1 + comp));
+    }
+
+    public static byte identityOrdType(DirectBuffer b, int at) {
+        int comp = b.getByte(at);
+        int cl = b.getByte(at + 1 + comp);
+        return b.getByte(at + 2 + comp + cl);
+    }
+
+    private static String ascii(DirectBuffer b, int at, int length) {
+        byte[] out = new byte[length];
+        b.getBytes(at, out);
+        return new String(out, StandardCharsets.US_ASCII);
     }
 
     // ------------------------------------------------------------------ encoders (return the length)
@@ -108,10 +164,10 @@ public final class InputCodec {
         b.putInt(p + 8, c.instrumentId, ORDER);
         b.putInt(p + 12, c.accountId, ORDER);
         b.putInt(p + 16, c.userId, ORDER);
-        b.putByte(p + 20, ord(c.side));
-        b.putByte(p + 21, ord(c.type));
-        b.putByte(p + 22, ord(c.tif));
-        b.putByte(p + 23, ord(c.pegReference));
+        b.putByte(p + 20, Wire.SIDES.id(c.side));
+        b.putByte(p + 21, Wire.ORDER_TYPES.id(c.type));
+        b.putByte(p + 22, Wire.TIFS.id(c.tif));
+        b.putByte(p + 23, Wire.PEG_REFERENCES.id(c.pegReference));
         b.putLong(p + 24, c.price, ORDER);
         b.putLong(p + 32, c.qty, ORDER);
         b.putLong(p + 40, c.maxShow, ORDER);
@@ -127,10 +183,10 @@ public final class InputCodec {
         c.instrumentId = b.getInt(p + 8, ORDER);
         c.accountId = b.getInt(p + 12, ORDER);
         c.userId = b.getInt(p + 16, ORDER);
-        c.side = enumOf(SIDES, b.getByte(p + 20));
-        c.type = enumOf(ORDER_TYPES, b.getByte(p + 21));
-        c.tif = enumOf(TIFS, b.getByte(p + 22));
-        c.pegReference = enumOf(PEG_REFERENCES, b.getByte(p + 23));
+        c.side = Wire.SIDES.of(b.getByte(p + 20));
+        c.type = Wire.ORDER_TYPES.of(b.getByte(p + 21));
+        c.tif = Wire.TIFS.of(b.getByte(p + 22));
+        c.pegReference = Wire.PEG_REFERENCES.of(b.getByte(p + 23));
         c.price = b.getLong(p + 24, ORDER);
         c.qty = b.getLong(p + 32, ORDER);
         c.maxShow = b.getLong(p + 40, ORDER);
@@ -140,11 +196,20 @@ public final class InputCodec {
     }
 
     public static int cancel(MutableDirectBuffer b, int o, long orderId, int userId, CancelSource source) {
+        return cancel(b, o, orderId, userId, source, 0);
+    }
+
+    public static int cancel(MutableDirectBuffer b, int o, long orderId, int userId, CancelSource source, long requestId) {
         int p = o + HEADER;
         b.putLong(p, orderId, ORDER);
         b.putInt(p + 8, userId, ORDER);
-        b.putByte(p + 12, ord(source));
-        return header(b, o, CANCEL, 13);
+        b.putByte(p + 12, Wire.CANCEL_SOURCES.id(source));
+        b.putLong(p + 13, requestId, ORDER);
+        return header(b, o, CANCEL, 21);
+    }
+
+    public static long cancelRequestId(DirectBuffer b, int o) {
+        return b.getLong(o + HEADER + 13, ORDER);
     }
 
     public static long cancelOrderId(DirectBuffer b, int o) {
@@ -156,7 +221,7 @@ public final class InputCodec {
     }
 
     public static CancelSource cancelSource(DirectBuffer b, int o) {
-        return enumOf(CANCEL_SOURCES, b.getByte(o + HEADER + 12));
+        return Wire.CANCEL_SOURCES.of(b.getByte(o + HEADER + 12));
     }
 
     public static int replace(MutableDirectBuffer b, int o, ReplaceCommand c) {
@@ -167,7 +232,8 @@ public final class InputCodec {
         b.putLong(p + 20, c.qty, ORDER);
         b.putLong(p + 28, c.maxShow, ORDER);
         b.putLong(p + 36, c.discretion, ORDER);
-        return header(b, o, REPLACE, 44);
+        b.putLong(p + 44, c.requestId, ORDER);
+        return header(b, o, REPLACE, 52);
     }
 
     public static void decodeReplace(DirectBuffer b, int o, ReplaceCommand c) {
@@ -178,15 +244,16 @@ public final class InputCodec {
         c.qty = b.getLong(p + 20, ORDER);
         c.maxShow = b.getLong(p + 28, ORDER);
         c.discretion = b.getLong(p + 36, ORDER);
+        c.requestId = b.getLong(p + 44, ORDER);
     }
 
     public static int massCancel(MutableDirectBuffer b, int o, MassCancelScope scope, int scopeId, int userId,
             CancelSource source) {
         int p = o + HEADER;
-        b.putByte(p, ord(scope));
+        b.putByte(p, Wire.SCOPES.id(scope));
         b.putInt(p + 1, scopeId, ORDER);
         b.putInt(p + 5, userId, ORDER);
-        b.putByte(p + 9, ord(source));
+        b.putByte(p + 9, Wire.CANCEL_SOURCES.id(source));
         return header(b, o, MASS_CANCEL, 10);
     }
 
@@ -202,7 +269,7 @@ public final class InputCodec {
         int p = o + HEADER;
         b.putInt(p, lineId, ORDER);
         b.putInt(p + 4, giver, ORDER);
-        b.putByte(p + 8, ord(type));
+        b.putByte(p + 8, Wire.CREDIT_TYPES.id(type));
         b.putLong(p + 9, limitUsd, ORDER);
         return header(b, o, CREDIT_LINE, 17);
     }
@@ -272,7 +339,7 @@ public final class InputCodec {
     public static int sessionState(MutableDirectBuffer b, int o, int instrumentId, SessionState state) {
         int p = o + HEADER;
         b.putInt(p, instrumentId, ORDER);
-        b.putByte(p + 4, ord(state));
+        b.putByte(p + 4, Wire.SESSION_STATES.id(state));
         return header(b, o, SESSION_STATE, 5);
     }
 
@@ -298,13 +365,4 @@ public final class InputCodec {
     static byte i8(DirectBuffer b, int o, int bodyOffset) {
         return b.getByte(o + HEADER + bodyOffset);
     }
-
-    static final Side[] SIDES = Side.values();
-    static final OrderType[] ORDER_TYPES = OrderType.values();
-    static final TimeInForce[] TIFS = TimeInForce.values();
-    static final PegReference[] PEG_REFERENCES = PegReference.values();
-    static final CancelSource[] CANCEL_SOURCES = CancelSource.values();
-    static final MassCancelScope[] SCOPES = MassCancelScope.values();
-    static final CreditType[] CREDIT_TYPES = CreditType.values();
-    static final SessionState[] SESSION_STATES = SessionState.values();
 }

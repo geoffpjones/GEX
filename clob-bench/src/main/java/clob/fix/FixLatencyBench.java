@@ -51,6 +51,7 @@ public final class FixLatencyBench {
         UnsafeBuffer cmd = new UnsafeBuffer(ByteBuffer.allocateDirect(InputCodec.MAX_LENGTH));
         pipeline.submit(cmd, 0, InputCodec.creditLine(cmd, 0, 1, 1, CreditType.UNLIMITED, 0));
         pipeline.submit(cmd, 0, InputCodec.usdRate(cmd, 0, "EUR", CreditEngine.RATE_SCALE));
+        pipeline.submit(cmd, 0, InputCodec.valueDates(cmd, 0, 0, 20_000, -1));
         pipeline.drain();
         FixGateway gateway = new FixGateway(new FixGatewayConfig("CLOB", 0, 1,
                 List.of(new FixSessionConfig("BENCH", "u1", "p1", 1, false, 0)), 5_000), refData, pipeline, out,

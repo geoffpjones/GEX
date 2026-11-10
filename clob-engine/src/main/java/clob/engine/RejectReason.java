@@ -21,5 +21,7 @@ public enum RejectReason {
     INVALID_TIF_FOR_TYPE,
     /** The instrument is pre-open or closed. */
     MARKET_NOT_OPEN,
-    MARKET_HALTED
+    MARKET_HALTED,
+    /** Pre-open accepts limit and iceberg orders only: pegs and mid have no reference, market orders cannot wait. */
+    ORDER_TYPE_NOT_ALLOWED_IN_PRE_OPEN
 }
